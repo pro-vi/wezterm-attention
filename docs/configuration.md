@@ -34,8 +34,8 @@ attention.apply_to_config(config, {
   show_directory = true,
   settled_title_fallback = true,
 
-  -- Append " · Claude", " · Codex" or " · Pi" when the tab's indicator comes
-  -- from a pane with a provider binding.
+  -- Append " · <Provider>" (for example " · Claude") when the tab's indicator
+  -- comes from a pane with a provider binding.
   show_provider = false,
 
   -- Called after each poll with what changed in a window's pane views.

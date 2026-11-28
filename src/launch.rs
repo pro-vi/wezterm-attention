@@ -797,6 +797,16 @@ impl HostProof {
         address: &PaneAddress,
     ) -> Result<Self> {
         let (owner, reading) = read_owner(env, ports.processes)?;
+        Self::establish_with_owner(env, ports, address, owner, reading)
+    }
+
+    fn establish_with_owner(
+        env: &BTreeMap<String, String>,
+        ports: &RuntimePorts<'_>,
+        address: &PaneAddress,
+        owner: ClaimOwner,
+        reading: HostReading,
+    ) -> Result<Self> {
         let rows = ports.panes.list(pane_socket(env)?)?;
         let mut listed = rows.iter().filter(|row| row.pane_id == address.pane_id);
         let (Some(row), None) = (listed.next(), listed.next()) else {
@@ -858,6 +868,17 @@ impl HostProof {
                 "the pane's claim belongs to another agent process",
             ));
         }
+        Self::confirm_claim(env, ports, address, claim, owner, reading)
+    }
+
+    fn confirm_claim(
+        env: &BTreeMap<String, String>,
+        ports: &RuntimePorts<'_>,
+        address: &PaneAddress,
+        claim: &Value,
+        owner: ClaimOwner,
+        reading: HostReading,
+    ) -> Result<Self> {
         let (tty_path, tty_fingerprint) = recorded_terminal(claim)?;
         let proof = Self {
             owner,
@@ -1202,6 +1223,18 @@ pub(crate) fn self_claim_refusal(
     }
 }
 
+/// How [`self_owned_launch`] handles an absent or foreign self-owned claim.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SelfClaimMode {
+    /// Require an existing self-owned claim owned by this host (no mux query).
+    RequireExisting,
+    /// Establish host proof via the mux and claim or replace a dead owner's claim.
+    Claim,
+    /// Reuse this host's existing self-owned claim without querying the mux,
+    /// and otherwise establish host proof and claim the pane.
+    ReuseOrClaim,
+}
+
 /// Resolve an agent event that carries no launch id against a claim its own
 /// agent process holds.
 ///
@@ -1213,38 +1246,62 @@ pub(crate) fn self_owned_launch(
     ports: &RuntimePorts<'_>,
     address: &PaneAddress,
     claim: Option<Value>,
-    starts_session: bool,
+    mode: SelfClaimMode,
 ) -> Result<SelfOwnedLaunch> {
     if let Some(refusal) = self_claim_refusal(env, ports.processes) {
         return Err(refusal);
     }
     asserted_host(env)?;
-    if let Some(claim) = &claim
-        && ClaimMode::of(claim)? == ClaimMode::Shell
-    {
+    let claim_mode = claim.as_ref().map(ClaimMode::of).transpose()?;
+    if claim_mode == Some(ClaimMode::Shell) {
         return Err(shell_claim_refusal());
     }
-    if starts_session {
-        let proof = HostProof::establish(env, ports, address)?;
-        let (claim, publication_diagnostic) = claim_for_host(env, ports, address, &proof)?;
-        return Ok(SelfOwnedLaunch {
-            claim,
-            proof,
-            publication_diagnostic,
-        });
+    match mode {
+        SelfClaimMode::Claim => {
+            let proof = HostProof::establish(env, ports, address)?;
+            let (claim, publication_diagnostic) = claim_for_host(env, ports, address, &proof)?;
+            Ok(SelfOwnedLaunch {
+                claim,
+                proof,
+                publication_diagnostic,
+            })
+        }
+        SelfClaimMode::ReuseOrClaim => {
+            let (owner, reading) = read_owner(env, ports.processes)?;
+            if let Some(existing) = claim
+                && claim_mode == Some(ClaimMode::SelfOwned(owner.clone()))
+            {
+                let proof =
+                    HostProof::confirm_claim(env, ports, address, &existing, owner, reading)?;
+                return Ok(SelfOwnedLaunch {
+                    claim: existing,
+                    proof,
+                    publication_diagnostic: None,
+                });
+            }
+            let proof = HostProof::establish_with_owner(env, ports, address, owner, reading)?;
+            let (claim, publication_diagnostic) = claim_for_host(env, ports, address, &proof)?;
+            Ok(SelfOwnedLaunch {
+                claim,
+                proof,
+                publication_diagnostic,
+            })
+        }
+        SelfClaimMode::RequireExisting => {
+            // Nothing but a session start (or lazy-binding resume start) can
+            // make a claim, so there is nothing to prove this against.
+            let Some(claim) = claim else {
+                return Err(AttentionError::new(
+                    DiagnosticCode::ClaimStale,
+                    "provider event has no matching pane claim",
+                ));
+            };
+            let proof = HostProof::of_claim(env, ports, address, &claim)?;
+            Ok(SelfOwnedLaunch {
+                claim,
+                proof,
+                publication_diagnostic: None,
+            })
+        }
     }
-    // Nothing but a session start can make a claim, so there is nothing to
-    // prove this against.
-    let Some(claim) = claim else {
-        return Err(AttentionError::new(
-            DiagnosticCode::ClaimStale,
-            "provider event has no matching pane claim",
-        ));
-    };
-    let proof = HostProof::of_claim(env, ports, address, &claim)?;
-    Ok(SelfOwnedLaunch {
-        claim,
-        proof,
-        publication_diagnostic: None,
-    })
 }

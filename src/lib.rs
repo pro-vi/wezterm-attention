@@ -28,6 +28,7 @@
     )
 )]
 
+pub mod agy_status;
 pub mod check_file;
 pub mod children;
 pub mod claude_status;

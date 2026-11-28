@@ -128,8 +128,10 @@ A provider event finds its launch in this order, and stops at the first rule tha
    (`WEZTERM_ATTENTION_ENABLE_SELF_CLAIM` set to anything but `1`) or the platform is not macOS
    (`claim_stale`); when `WEZTERM_ATTENTION_HOST_PID` is missing or is not a positive decimal pid
    (`self_claim_parent_unverified`); when the pane holds a shell claim, for every event
-   (`claim_stale`); and, for any event but a session start, when the pane holds no claim
-   (`claim_stale`), before anything is proved or the mux is asked.
+   (`claim_stale`); and, for any event but a session start or an Agy resume start (a lead Agy
+   `PreInvocation` carrying a valid `transcriptPath`, because as of `agy` 1.5.16 `agy --resume`
+   skips `SessionStart`), when the pane holds no claim (`claim_stale`), before anything is proved
+   or the mux is asked.
 3. Otherwise the writer proves its host. Its direct parent, as the kernel reports it, must be the
    process `WEZTERM_ATTENTION_HOST_PID` names, alive, this user's and not replaced while it is
    read, and the writer must not be traced (`self_claim_parent_unverified`). The host's terminal
@@ -137,27 +139,31 @@ A provider event finds its launch in this order, and stops at the first rule tha
    parent's; a terminal the kernel cannot report refuses (`probe_unavailable`), and a writer and
    parent that both have none refuse as `session_detached`: an agent that runs its sessions in
    a background process with no terminal hands that process's environment, taken from whichever
-   pane started it, to every session's hooks. A session start
-   asks the mux: the host's terminal must be the device of the terminal the mux lists for
-   `WEZTERM_PANE` on the current socket, and the listing must succeed and name the pane exactly
-   once (`unsafe_tty` otherwise). Any other event asks the mux nothing and proves itself against
-   the pane's self-owned claim instead: the parent must be the claim's owner, the same pid started
-   at the same time on the same boot (`claim_stale` otherwise); the host's terminal must be the
-   device at the claim's `tty_path`, with the claim's `tty_fingerprint` (`unsafe_tty`); and the
-   socket must still be the incarnation the claim was made on (`incarnation_changed`). The listing
-   that made the claim proved that terminal is the pane's, and while its owner still runs on it,
-   the one thing a listing would add is whether the pane is still open: an agent that outlives its
-   closed pane keeps writing to that pane's records until its terminal goes away, and nothing
-   displays them.
-4. A session start then claims, under the pane's claim lock and no other lock, after reading the
-   same host again. No claim: a new self-owned claim with a new launch id. The same process's own
-   claim: kept as it is, not rewritten. Another process's claim: replaced with a new launch id only
-   when that process is proven gone, meaning the boot session differs, no process has its pid, or
-   the process there started at another time; a live owner keeps the pane (`claim_stale`), and a
-   zombie or an owner that cannot be read keeps it too (`probe_unavailable`). Creating or replacing
-   needs the parent to be in the terminal's foreground process group; it need not lead that
-   group, as a native agent started by a launcher process does not. Keeping does not need it.
-   The claim is published to the proven terminal before the lock is released.
+   pane started it, to every session's hooks. A session start — or an Agy resume start when the
+   pane does not already hold this host's own claim — asks the mux: the host's terminal must be
+   the device of the terminal the mux lists for `WEZTERM_PANE` on the current socket, and the
+   listing must succeed and name the pane exactly once (`unsafe_tty` otherwise). Any other event
+   (including an Agy resume start when the pane already holds this host's own claim) asks the mux
+   nothing and proves itself against the pane's self-owned claim instead: the parent must be the
+   claim's owner, the same pid started at the same time on the same boot (`claim_stale`
+   otherwise); the host's terminal must be the device at the claim's `tty_path`, with the claim's
+   `tty_fingerprint` (`unsafe_tty`); and the socket must still be the incarnation the claim was
+   made on (`incarnation_changed`). The listing that made the claim proved that terminal is the
+   pane's, and while its owner still runs on it, the one thing a listing would add is whether the
+   pane is still open: an agent that outlives its closed pane keeps writing to that pane's records
+   until its terminal goes away, and nothing displays them.
+4. A session start — or an Agy resume start that did not already prove itself against this host's
+   existing self-owned claim — then claims, under the pane's claim lock and no other lock, after
+   reading the same host again. No claim: a new self-owned claim with a new launch id. The same
+   process's own claim: kept as it is, not rewritten. Another process's claim: replaced with a new
+   launch id only when that process is proven gone, meaning the boot session differs, no process
+   has its pid, or the process there started at another time; a live owner keeps the pane
+   (`claim_stale`), and a zombie or an owner that cannot be read keeps it too (`probe_unavailable`).
+   Creating or replacing needs the parent to be in the terminal's foreground process group; it need
+   not lead that group, as a native agent started by a launcher process does not. Keeping does not
+   need it. The claim is published to the proven terminal before the lock is released. On an Agy
+   resume start whose session is not yet the launch's current binding, the writer lazily creates or
+   replaces the binding (under the same-host rule below) before running checks or writing activity.
 5. Any other event resolves against the self-owned claim it proved itself against.
 
 Every writer of a launch's records takes the launch lock, then the pane's claim lock, then a
@@ -190,17 +196,20 @@ Exact TTL equality remains eligible. The first ineligible instant is one nanosec
 malformed, unavailable, or negative wall age fails closed: TTL-bearing state is omitted, retention
 does not prune it, and diagnostics report `record_invalid`, `probe_unavailable`, or `clock_skew`.
 
-A lead `UserPromptSubmit` starts the turn's `thinking` activity for Claude and Codex, the way
-Pi's `agent_start` does, so the pane is tinted from the prompt rather than from the turn's first
-tool call and a turn that calls no tool still shows activity. The first `PreToolUse` of that turn
+A lead `UserPromptSubmit` starts the turn's `thinking` activity for Claude and Codex, as Agy's
+lead `PreInvocation` and Pi's `agent_start` do, so the pane is tinted from the prompt rather
+than from the turn's first tool call and a turn that calls no tool still shows activity. The first `PreToolUse` of that turn
 repeats the same `thinking` and is skipped. A child actor cannot write lead state, so its prompt
-stays observation-only. The one exception is a child's `PermissionRequest`: a child blocked on a
-permission prompt waits for the user as the lead would, so it publishes lead `notify` activity and
-marks the child `waiting` in the binding's `children.json`; its observation still names the child
-as the actor. While that child waits, the lead's next `thinking` does not replace the visible
-`notify`. The wait has no time limit, because a child blocked on a prompt sends nothing: it ends at
-the child's next tool call, its `SubagentStop`, a Codex parent stop or a Claude lead `Stop` that
-removes it, or the binding's end. A user prompt or any lead activity other than `thinking` replaces the stored `notify`
+stays observation-only. The exception is a child waiting for the user — a Claude or Codex child's
+`PermissionRequest`, or an Agy child's `PreToolUse` of `ask_question` — which waits for the user as
+the lead would, so it publishes lead `notify` activity and marks the child `waiting` in the
+binding's `children.json`; its observation still names the child as the actor. While that child
+waits, the lead's next `thinking` does not replace the visible `notify`. The wait has no time limit,
+because a child blocked on a prompt sends nothing: it ends at the child's next tool call (for Agy,
+child `PreInvocation`, non-blocking `PreToolUse`, or `PostToolUse` of `ask_question`), its
+`SubagentStop` or Agy child `Stop` (`fullyIdle != false`), a Codex parent stop, a Claude lead `Stop`
+or Agy lead `PostToolUse` of `manage_subagents` / terminal lead `Stop` that removes it, or the
+binding's end. A user prompt or any lead activity other than `thinking` replaces the stored `notify`
 at once; a lead `stop` still shows as `notify` while a counted child waits. A child set that cannot be read or changed does not stop the `notify`; the event reports
 `partial` with that record's diagnostic.
 
@@ -213,10 +222,12 @@ write of the lifecycle observation, which is written last, is reported with what
 to report kept under `replaced`; a failed write of any other record is reported alone (see
 [accepted limitations](accepted-limitations.md#a-record-write-can-be-reported-failed-after-readers-already-see-it)).
 
-The integration records nothing, on purpose, for four events it knows: Claude Code's `idle_prompt`
-notification, Pi's `agent_end`, a Pi `session_shutdown` for a reload, and a Pi `message_end` for a
-message whose role is not `assistant`, or for a reply that stopped with `stop`, `length`, `toolUse`, `pending`
-or `deferred`, the stop reasons Pi 0.85.1 defines besides `error` and `aborted`. The bundled Pi
+The integration records nothing, on purpose, for five event classes it knows: Claude Code's
+`idle_prompt` notification, Pi's `agent_end`, a Pi `session_shutdown` for a reload, a Pi
+`message_end` for a message whose role is not `assistant` or for a reply that stopped with `stop`,
+`length`, `toolUse`, `pending` or `deferred` (the stop reasons Pi 0.85.1 defines besides `error`
+and `aborted`), and an unlinked Agy event whose `lastUserInput` is empty (preventing unlinked
+background or sub-agent callbacks from hijacking a lead binding). The bundled Pi
 extension forwards `message_end` only for a failed or aborted reply, and sends neither `agent_end`
 nor the `session_shutdown` of a reload, so the three Pi cases come only from another caller. Such an
 event answers `skipped` with no diagnostic, and the result's `message`, present only then, says why.
@@ -229,11 +240,14 @@ value the event depends on that this build does not know, such as a `SessionStar
 notification type, a Pi `message_end` with no role, or a Pi reply whose stop reason is missing or
 not listed above.
 
-A turn that ends without `Stop` still ends the activity when the provider reports the ending. A
-lead Claude `StopFailure` (an API error ended the turn) publishes `notify`, because the user must
-act. A Codex `Interrupt` writes an activity clear for that session, because the user stopped the
-turn and there is nothing to report; it does not touch a Pi review. Both keep their lifecycle
-observation. A child's `StopFailure` stays observation-only.
+A turn that ends without a normal `Stop` still ends the activity when the provider reports the
+ending. A lead Claude `StopFailure` (an API error ended the turn) or a lead Agy `Stop` with an
+error `terminationReason` (`fullyIdle != false`) publishes `notify` (labelled with the reason on
+Agy), because the user must act. A Codex `Interrupt` or a lead Agy `Stop` with `terminationReason`
+`USER_CANCELED` (`fullyIdle != false`) writes an activity clear for that session, because the user
+stopped the turn and there is nothing to report; neither touches a Pi review. All keep their
+lifecycle observation. A child's `StopFailure` stays observation-only. An Agy lead `Stop` with
+`fullyIdle: false` keeps the turn open as `thinking` with no turn-end observation.
 A Claude turn the user stops with Esc runs no hook as of Claude Code 2.1.300. Where its prompt hook
 proved its host, the turn follower that hook starts reads the host's status file, which Claude Code
 keeps in its configuration directory, and once the file goes from a working turn to none it
@@ -249,6 +263,16 @@ wrote and is recorded after it still shows. The file says only that no turn is w
 ended normally but whose `Stop` Attention did not record, because the hook failed or timed out, is
 recorded as such an interrupt too. See
 [Accepted limitations](accepted-limitations.md#a-claude-turn-stopped-with-esc-is-recorded-only-from-its-status-file).
+An `agy` turn the user stops with Esc (or `SIGINT` in print mode) runs no `Stop` hook as of `agy`
+1.5.16. On macOS, where its lead `PreInvocation(invocationNum: 0)` prompt hook proved its host,
+the turn follower polls `agy`'s local SQLite status databases (`conversation_summaries.db` and,
+when `initialNumSteps` is present, `conversations/<id>.db`) and records a lead `user_interrupt`
+with `source_event` `agy_status` and an activity clear once either a step at or after
+`initialNumSteps` is canceled/interrupted with no active step or active summary row, or the
+summary row goes from working to idle; it obeys the same latest-prompt, open-turn and monotonic
+stamping rules as Claude's follower, treating a newer uncleared `agy` `thinking` activity after a
+blocked `Stop` as reopening the turn. See
+[Accepted limitations](accepted-limitations.md#an-agy-turn-stopped-with-esc-is-recorded-only-from-its-status-databases).
 A Codex turn that ends on a model error runs no hook as of Codex 0.162.0. Where a lead hook that
 names a turn proved its host, the turn follower that hook starts reads the session rollout and
 records the end: an `attempt_outcome` with `outcome` `failed`, `source_event` `task_complete`, the
@@ -282,26 +306,33 @@ limitations](accepted-limitations.md#a-codex-turn-that-ends-on-a-model-error-is-
 active binding as `resume` and `clear` do. A Pi `session_start` with source `new`, `resume` or
 `fork` replaces it; one with source `startup` or `reload` does not.
 
-While the active binding has not ended, a lead Codex `SessionStart` with source `startup` for
-another session replaces it only when it carries a valid `transcript_path`, the hook proved its
-host, and the active binding's `host.json` names the same process on the same terminal
-(`tty_path` and `tty_fingerprint`) and has no `contested_at_unix_ns`. Any other such start is
-refused (`binding_conflict`), and a Claude `startup` never replaces an active binding; a start
-whose proof no longer holds under the launch and claim locks is ignored with the proof's
-diagnostic, as any event is. As of Codex 0.162.0, `/new` makes this start and runs no `SessionEnd`
-for the session before, and an ephemeral session, such as the memory consolidation worker Codex
-runs in the same process, names no transcript. The proof says which process started the session,
-not which session the pane shows, so the binding names the newest lead session its host started;
-what that leaves for the earlier session is in
-[Accepted limitations](accepted-limitations.md#after-codex-new-the-earlier-sessions-turns-are-not-shown).
+While the active binding has not ended, a lead Codex `SessionStart` with source `startup` — or a
+lead Agy `SessionStart` (`start_source` `unspecified`, as on `/new` and `/clear`) or lazy lead Agy
+`PreInvocation` (`--resume`) — for another session replaces it only when it carries a valid
+transcript path (`transcript_path` for Codex, `transcriptPath` for Agy), the hook proved its host,
+and the active binding's `host.json` names the same process on the same terminal (`tty_path` and
+`tty_fingerprint`) and has no `contested_at_unix_ns`. Any other such start (including an Agy start
+lacking either proof) is refused (`binding_conflict`), and a Claude `startup` never replaces an
+active binding; a start whose proof no longer holds under the launch and claim locks is ignored with
+the proof's diagnostic, as any event is. As of Codex 0.162.0 and `agy` 1.5.16, `/new` (and `/clear`
+in `agy`) makes this start and runs no `SessionEnd` for the session before, and an ephemeral Codex
+session, such as the memory consolidation worker Codex runs in the same process, names no
+transcript. The proof says which process started the session, not which session the pane shows, so
+the binding names the newest lead session its host started; what that leaves for the earlier session
+is in [Accepted limitations](accepted-limitations.md#after-codex-new-the-earlier-sessions-turns-are-not-shown).
 
 A provider event with a malformed optional field keeps its action and loses only that field. The
 fields are `agent_type`, `transcript_path` or `session_file`, `cwd`, `CLAUDE_CONFIG_DIR`,
-`CODEX_HOME`, `PI_CODING_AGENT_DIR`, `model`, and the Pi bus `label`. One `record_invalid`
-diagnostic names them, with message `optional fields were dropped: …` and the list in
-`context.dropped_fields`. An empty `agent_type` is not malformed: it says the agent has no type, as
-Claude Code 2.1.283 sends for the agents it runs for itself. A malformed `session_id` still
-ignores the event, because it is identity, not metadata. A native enum value this version does
+`CODEX_HOME`, `PI_CODING_AGENT_DIR`, `model`, the Pi bus `label`, and Agy's `transcriptPath`,
+`modelName`, and `artifactDirectoryPath`. One `record_invalid` diagnostic names them,
+with message `optional fields were dropped: …` and the list in `context.dropped_fields`. An empty
+`agent_type` is not malformed: it says the agent has no type, as Claude Code
+2.1.283 sends for the agents it runs for itself. For Agy, dropping a malformed `transcriptPath`
+fails closed on lead `PreInvocation(invocationNum: 0)` prompt confirmation and lazy-binding
+eligibility, and dropping a malformed `artifactDirectoryPath` prevents filesystem sub-agent lineage
+lookup (leaving an unlinked empty-`lastUserInput` callback skipped). A malformed `session_id` (or
+Agy `conversationId`) still ignores the event, because it is identity, not metadata. A native enum
+value this version does
 not know keeps the observation: an unknown `error_category` becomes `unknown`, and an unknown
 `input_source` or compaction trigger is omitted.
 
@@ -313,14 +344,17 @@ Prompt return is `hooks publish` from a bound pane. It republishes the pane iden
 ## Child presence
 
 A binding's `children.json`, kind `child_presence_set`, holds the sub-agents of that binding that
-are running now, and nothing else. Only the providers in `subagent_providers`, Claude and Codex,
-have one; a Pi binding never does. Besides `kind`, `schema`, `address`, `launch_id`, `binding_id`
+are running now, and nothing else. Only the providers in `subagent_providers` — Claude, Codex, and
+Agy — have one; a Pi binding never does. Besides `kind`, `schema`, `address`, `launch_id`, `binding_id`
 and `provider`, it carries a `revision` UUID replaced on every write, `written_at_unix_ns`, and:
 
 - `live`: one entry per running child, `{agent_id, agent_type?, last_event, status,
-  last_mono_ns}`. `status` is `running`, or `waiting` once the child has asked for permission and
-  done nothing since. `last_event` names the kind of event that last changed the entry: `start`
-  (`SubagentStart`), `tool` (a tool call) or `permission` (a permission request). `agent_type` is
+  last_mono_ns}`. `status` is `running`, or `waiting` once the child has asked for permission
+  (or, on Agy, called `ask_question`) and done nothing since. `last_event` names the kind of event
+  that last changed the entry: `start` (`SubagentStart`, or Agy child `SessionStart`), `tool` (a
+  tool call, or Agy child `PreInvocation`, `ask_question` `PostToolUse`, or `Stop` with
+  `fullyIdle: false`) or `permission` (a permission request, or Agy child `PreToolUse` of
+  `ask_question`). `agent_type` is
   the provider's name for the kind of sub-agent, and nothing decides by its value. `last_mono_ns`
   is the order of the child's latest event.
 - `parent_clear`, optional: the latest Codex parent stop, `{observed_mono_ns, event_id, removed}`,
@@ -343,13 +377,24 @@ names, the writer empties `live`, drops `parent_clear` and records that end. A c
 at or before the recorded end, or one that arrives while the end still ends the binding, is then
 ignored (`binding_conflict`). After that the event itself applies:
 
-- **`SubagentStart`, a child's `PreToolUse` or a child's `PermissionRequest`** refreshes the child's
-  entry. `PreToolUse` sets `running`, `PermissionRequest` sets `waiting`, and `SubagentStart` keeps
-  the status the child had. A child not in the set is added only by `SubagentStart` or by an event
-  whose `agent_type` is not empty: Claude Code 2.1.283 also runs agents of its own, and one sent a
-  tool event with an `agent_id` and no type; those are not counted. The hook still succeeds for such
-  an event, and prints a `record_invalid` diagnostic naming it. A child's `PostToolUse` and
-  `PostToolUseFailure` change nothing.
+- **`SubagentStart`, a child's `PreToolUse` or a child's `PermissionRequest` (Claude/Codex)**
+  refreshes the child's entry. `PreToolUse` sets `running`, `PermissionRequest` sets `waiting`, and
+  `SubagentStart` keeps the status the child had. A child not in the set is added only by
+  `SubagentStart` or by an event whose `agent_type` is not empty: Claude Code 2.1.283 also runs
+  agents of its own, and one sent a tool event with an `agent_id` and no type; those are not
+  counted. The hook still succeeds for such an event, and prints a `record_invalid` diagnostic
+  naming it. A Claude or Codex child's `PostToolUse` and `PostToolUseFailure` change nothing.
+- **Agy sub-agent hooks** link a sub-agent (including nested grandchildren) to its root lead
+  session through `<artifactDirectoryPath>/.system_generated/messages/*.json`. Child `SessionStart` acts like `SubagentStart`
+  (adding the child even without an `agent_type`); child `PreInvocation`, non-blocking `PreToolUse`,
+  and `Stop` with `fullyIdle: false` refresh the child as `running`; child `PreToolUse` of
+  `ask_question` publishes lead `notify` and marks the child `waiting`; child `PostToolUse` of
+  `ask_question` clears the child back to `running` without touching lead `activity.json`, child
+  `PostToolUse` of `manage_subagents` (`kill`) also removes the listed target ids atomically, and
+  any other child `PostToolUse` stays observation-only; child `Stop` with `fullyIdle: true` (or
+  absent) removes the child. On the lead, `PostToolUse` of `manage_subagents` removes listed ids
+  (`kill`) or reconciles against an empty in-flight list (`kill_all`), and a terminal lead `Stop`
+  (`fullyIdle != false`) reconciles against an empty in-flight list.
 - **The child's `SubagentStop`** removes it. A stop for a child the set does not hold changes
   nothing.
 - **A Codex parent `Stop`** takes the order of the activity it leaves standing as a cutoff,
@@ -395,9 +440,11 @@ without reading it; sweep keeps a binding that holds a link, as it keeps any. Th
 set held are counted again at their next event. A set that a newer writer wrote (`future_schema`),
 one that cannot be read, one that cannot be moved aside (`probe_unavailable`), or a change past the
 size bound, leaves the set as it was: a child's event is refused with that diagnostic, while a
-child's permission request, a Codex parent `Stop` and a Claude lead `Stop` that lists tasks still write
-their activity and report
-`partial`, with `native_state` rejected, so no consumer is given the event.
+child's permission request (or Agy child `PreToolUse` of `ask_question`), a Codex parent `Stop`, a
+Claude lead `Stop` that lists tasks, and an Agy lead `PostToolUse` of `manage_subagents`
+(`kill`/`kill_all`) or terminal lead `Stop` (including `USER_CANCELED` clear) still write their
+activity or activity clear and report `partial`, with `native_state` rejected, so no consumer is
+given the event.
 
 Readers, the plugin and `attention inspect`, check the set's structure and count its `live`
 entries. They apply none of the rules above but one, the binding's end: no child is counted while
@@ -534,7 +581,7 @@ Existing native mutations run before lifecycle replacement. There is no multi-fi
 
 `attention bindings --json` returns validated facts and four independent axes: binding phase, pane
 presence, reader confidence, and binding health. It never returns a resume command. Consumers build
-their own argv from the closed provider and session ID fields.
+their own argv from the provider (an open identifier under [ADR 0011](adr/0011-provider-is-an-open-identifier.md)) and session ID fields.
 
 `conflicted` health and the `binding_conflict` diagnostic mean two live claims on one provider
 session at different pane addresses. A binding that has ended, whose pane is verified absent, or
@@ -557,10 +604,12 @@ JSON responses contain `schema`, `command`, `status`, `complete`, `result`, and 
 
 
 A `hold_notes` entry may instead contain exactly `quiet=true` and an `answer`
-token. This is allowed on Claude and Codex binding Stops, where the
-corresponding `turn_end.hold_checks` entry retains the same note, and, as the
-only kind of note there, on a Claude or Codex binding's `thinking`: the note a
-quiet check gave as the lead's turn started, which has no `turn_end` entry. `held` is derived only from
+token. This is allowed on Claude, Codex, and Agy binding Stops — where the
+corresponding `turn_end.hold_checks` entry retains the same note only on
+`response_finished` `Stop` observations (never on `attempt_outcome` or
+`user_interrupt` Stops) — and, as the only kind of note there, on a Claude,
+Codex, or Agy binding's `thinking`: the note a quiet check gave as the lead's
+turn started, which has no `turn_end` entry. `held` is derived only from
 hold notes. Quiet presentation is derived from quiet notes and yields to held
 presentation and waiting permissions. A failed revalidation removes the
 applicable note and records `evidence_changed`; no stored quiet boolean is
@@ -673,7 +722,7 @@ apart; sightings from before that binding ended do not count. A tree holding any
 `keep`; the preview says `keep` wherever apply would keep. Temporary files left by an interrupted
 write, a review that an earlier plugin build had moved aside to `<review>.json.<session>.<ms>.clear`
 while clearing it and never finished with, the lock `reviews/.<owner key>.lock` that every
-review writer leaves beside the reviews, and the lock `.follower.lock` a Codex turn follower leaves
+review writer leaves beside the reviews, and the lock `.follower.lock` a turn follower leaves
 in its binding's directory, do not hold a binding or pane tree back from retention; a lock-like
 file of any other name or place does. Nothing reads a moved-aside review. Every removal sweep makes stays inside the state
 root: a target reached through a symlinked directory below the root is kept, with a

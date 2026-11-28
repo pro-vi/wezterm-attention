@@ -925,7 +925,10 @@ fn lead_prompts(
             observation_id: Uuid::new_v4().to_string(),
             observed_mono_ns: latest.into(),
             written_at_unix_ns: "00000000000000000001".into(),
+            turn_id: None,
         }),
+        last_execution_num: None,
+        execution_history_lost: false,
         answers,
     };
     let protocol = wezterm_attention::protocol::manifest().unwrap();

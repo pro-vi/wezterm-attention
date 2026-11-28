@@ -124,6 +124,12 @@ pub enum ChildTransition<'a> {
         agent_id: &'a str,
         order: &'a str,
     },
+    /// Several children stopped by one tool call (such as an `agy`
+    /// `manage_subagents` kill listing explicit ids) at `order`.
+    StopIds {
+        agent_ids: &'a [String],
+        order: &'a str,
+    },
     ParentClear {
         order: &'a str,
         event_id: &'a str,
@@ -263,6 +269,9 @@ impl ChildPresenceSet {
             ChildTransition::Stop { agent_id, order } => self
                 .ignored_by_end(end, order)
                 .unwrap_or_else(|| self.stop(agent_id, order)),
+            ChildTransition::StopIds { agent_ids, order } => self
+                .ignored_by_end(end, order)
+                .unwrap_or_else(|| self.stop_many(agent_ids, order)),
             ChildTransition::Start {
                 agent_id,
                 agent_type,
@@ -401,6 +410,46 @@ impl ChildPresenceSet {
         Reduction::of(true, Disposition::Applied)
     }
 
+    fn stop_many(&mut self, agent_ids: &[String], order: &str) -> Reduction {
+        if agent_ids.iter().any(|agent_id| {
+            self.live
+                .iter()
+                .any(|child| child.agent_id == *agent_id && child.last_mono_ns.as_str() == order)
+        }) {
+            return Reduction::diagnosed(
+                false,
+                Disposition::Conflict,
+                DiagnosticCode::RecordInvalid,
+                "equal child order has different content",
+            );
+        }
+        let mut any_changed = false;
+        let mut any_ignored = false;
+        let mut last_diagnostic = None;
+        for agent_id in agent_ids {
+            let reduction = self.stop(agent_id, order);
+            if reduction.changed {
+                any_changed = true;
+            } else if reduction.disposition == Disposition::Ignored {
+                any_ignored = true;
+            }
+            if let Some(diagnostic) = reduction.diagnostic {
+                last_diagnostic = Some(diagnostic);
+            }
+        }
+        Reduction {
+            changed: any_changed,
+            disposition: if any_changed {
+                Disposition::Applied
+            } else if any_ignored {
+                Disposition::Ignored
+            } else {
+                Disposition::Skipped
+            },
+            diagnostic: last_diagnostic,
+        }
+    }
+
     /// Applies an event that shows a child working: a start, a tool call, or
     /// a permission request, named by `event`.
     fn advance(
@@ -501,6 +550,25 @@ impl ChildPresenceSet {
         self.counted(end).iter().any(|child| {
             child.status == ChildStatus::Waiting && child.last_mono_ns.as_str() >= since
         })
+    }
+
+    /// [`Self::waits_since`], excluding children that `transition` will actually
+    /// remove.
+    pub fn waits_since_after(
+        &self,
+        end: Option<EndMark<'_>>,
+        since: &str,
+        transition: Option<ChildTransition<'_>>,
+    ) -> bool {
+        if self.counted(end).is_empty() {
+            return false;
+        }
+        let Some(transition) = transition else {
+            return self.waits_since(end, since);
+        };
+        let mut after = self.clone();
+        let _ = after.apply(end, transition);
+        after.waits_since(end, since)
     }
 
     /// Whether some counted child waiting for permission outlasts the lead's

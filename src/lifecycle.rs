@@ -37,7 +37,9 @@ use crate::records::{
     review_lock, session_binding_files, session_entry, session_entry_path,
     session_registration_lock, state_root, turn_follower_lock, with_lock, within_read_bound,
 };
-use crate::turn_follower::{ClaudeTurn, CodexTurn, FOLLOWER_SOURCES, FollowRequest, FollowedTurn};
+use crate::turn_follower::{
+    AgyTurn, ClaudeTurn, CodexTurn, FOLLOWER_SOURCES, FollowRequest, FollowedTurn,
+};
 use crate::wezterm::RuntimePorts;
 
 #[derive(Debug)]
@@ -46,11 +48,16 @@ pub struct HookOutcome {
     pub admission: Option<AdmittedHook>,
     pub persistence: HookPersistence,
     pub observation_id: Option<String>,
+    pub observation_kind: Option<String>,
     pub turn_end: Option<TurnEnd>,
     pub hold_checks: Vec<HoldCheckOutcome>,
     /// Whether the admitted pane carried the user's mute once the hook's
     /// writes were done; false when no pane was admitted.
     pub muted: bool,
+    /// True only when this invocation freshly persisted a non-superseded turn
+    /// end for the binding's current turn, so an `agy` `Stop` without
+    /// `finalModelOutput` may safely fall back to the live transcript tail.
+    pub reply_transcript_attributable: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -62,10 +69,18 @@ struct HookEvidence {
     /// A child-set change the activity carried was refused, so not every
     /// native effect the action selected was written.
     native_refused: bool,
+    /// The proposed activity write was rejected while a sibling child cleanup
+    /// on the same hook applied, so neither `activity` nor `native_state`
+    /// confirmed the full requested action.
+    activity_refused: bool,
     pending_observation_id: Option<String>,
     observation_id: Option<String>,
+    pending_observation_kind: Option<String>,
+    observation_kind: Option<String>,
     pending_turn_end: Option<TurnEnd>,
     turn_end: Option<TurnEnd>,
+    pending_reply_transcript_attributable: bool,
+    reply_transcript_attributable: bool,
     hold_checks: Vec<HoldCheckOutcome>,
     /// The lifecycle snapshot id a quiet check read, `Some(None)` when the
     /// binding had recorded none yet; checked again under the writer locks.
@@ -94,14 +109,15 @@ fn confirm_native(resolved: &ResolvedLaunch, binding_id: &str, mutation: &Mutati
         .planned_native
         .unwrap_or_else(|| accepted(&mutation.result));
     if evidence.persistence.native_state != Persistence::NotRequested {
-        evidence.persistence.native_state = if admitted && !evidence.native_refused {
-            Persistence::Confirmed
-        } else {
-            Persistence::Rejected
-        };
+        evidence.persistence.native_state =
+            if admitted && !evidence.native_refused && !evidence.activity_refused {
+                Persistence::Confirmed
+            } else {
+                Persistence::Rejected
+            };
     }
     if evidence.persistence.activity != Persistence::NotRequested {
-        evidence.persistence.activity = if admitted {
+        evidence.persistence.activity = if admitted && !evidence.activity_refused {
             Persistence::Confirmed
         } else {
             Persistence::Rejected
@@ -174,7 +190,7 @@ pub struct LifecycleResult {
 }
 
 impl LifecycleResult {
-    fn new(disposition: Disposition) -> Self {
+    pub(crate) fn new(disposition: Disposition) -> Self {
         Self {
             disposition,
             diagnostic: None,
@@ -277,6 +293,11 @@ struct Mutation {
     /// Whether the prompt record alone stores the lead's prompt, so that its
     /// write is what confirms the prompt.
     prompt_record_alone: bool,
+    /// Write the prompt record before the lifecycle file (and before confirming
+    /// lifecycle evidence), used when `prompts.json` carries Agy's durable
+    /// `last_execution_num` replay guard so a partial write or pool eviction
+    /// cannot lose it.
+    prompts_before_lifecycle: bool,
 }
 
 impl Mutation {
@@ -286,6 +307,7 @@ impl Mutation {
             lifecycle_replacement: None,
             prompts_replacement: None,
             prompt_record_alone: false,
+            prompts_before_lifecycle: false,
         }
     }
 }
@@ -450,13 +472,14 @@ fn resolve_launch<'a>(
             )),
         };
     }
-    let resolved = crate::launch::self_owned_launch(
-        env,
-        ports,
-        &address,
-        claim,
-        event.action == ProviderAction::Binding,
-    )?;
+    let self_claim_mode = if event.action == ProviderAction::Binding {
+        crate::launch::SelfClaimMode::Claim
+    } else if event.lazy_binding {
+        crate::launch::SelfClaimMode::ReuseOrClaim
+    } else {
+        crate::launch::SelfClaimMode::RequireExisting
+    };
+    let resolved = crate::launch::self_owned_launch(env, ports, &address, claim, self_claim_mode)?;
     let launch_id = crate::launch::claim_launch_id(&resolved.claim)?;
     Ok(ResolvedLaunch {
         evidence: None,
@@ -904,6 +927,15 @@ fn binding_mutation_for_session(
                                     && started_by_recorded_host(resolved, current_id))
                         }
                         Provider::Pi => matches!(source, "new" | "resume" | "fork"),
+                        // As of agy 1.5.16, `/new` and `/clear` start a new
+                        // conversation in the same host process with no
+                        // SessionEnd hook, and `--resume` binds on its first
+                        // PreInvocation; replacing an active binding requires
+                        // a transcript path and the recorded host proof.
+                        Provider::Agy => {
+                            event.transcript_path.is_some()
+                                && started_by_recorded_host(resolved, current_id)
+                        }
                     };
                 if matches!(source, "compact" | "reload") || !replace {
                     return Ok(CommitPlan::reporting(Mutation::plain(
@@ -1274,24 +1306,47 @@ struct ActivityOutcome {
     written: Option<Value>,
 }
 
-fn newer_lead_observation(root: &Path, identity: &RecordIdentity, observation: &str) -> bool {
-    // Repeated thinking can keep the activity stamp unchanged. The lead's
-    // recorded events still show whether it advanced while a check ran: its
-    // pooled observations, and the prompt record's latest prompt, where alone
-    // a prompt typed while its turn runs is kept.
-    if latest_prompt(root, identity)
-        .is_some_and(|prompt| prompt.observed_mono_ns.as_str() > observation)
-    {
+// Repeated thinking can keep the activity stamp unchanged. The lead's
+// recorded events still show whether it advanced while a check ran: its
+// pooled observations, and the prompt record's latest prompt, where alone
+// a prompt typed while its turn runs is kept.
+fn has_newer_lead_observation(
+    snapshot: Option<&LifecycleSnapshot>,
+    prompt: Option<&PromptReference>,
+    observation: &str,
+) -> bool {
+    if prompt.is_some_and(|prompt| prompt.observed_mono_ns.as_str() > observation) {
         return true;
     }
-    // Unavailable rich history does not veto an independent native mutation;
-    // append_observation retains the read diagnostic on its existing path.
-    let Some(snapshot) = lifecycle_snapshot(root, identity) else {
-        return false;
-    };
-    snapshot
-        .lead_observations()
-        .any(|event| event.observed_mono_ns.as_str() > observation)
+    snapshot.is_some_and(|snapshot| {
+        snapshot
+            .lead_observations()
+            .any(|event| event.observed_mono_ns.as_str() > observation)
+    })
+}
+
+fn turn_end_draft(event: &ProviderEvent) -> Option<&LifecycleObservation> {
+    let provider = event.provider?;
+    event
+        .observation
+        .as_ref()
+        .filter(|draft| draft.ends_turn(provider))
+}
+
+fn child_cleanup_transition<'a>(
+    event: &'a ProviderEvent,
+    order: &'a str,
+) -> Option<ChildTransition<'a>> {
+    if let Some(in_flight) = event.in_flight_task_ids.as_deref() {
+        Some(ChildTransition::Reconcile { order, in_flight })
+    } else if !event.stopped_child_ids.is_empty() {
+        Some(ChildTransition::StopIds {
+            agent_ids: &event.stopped_child_ids,
+            order,
+        })
+    } else {
+        None
+    }
 }
 
 /// What a turn end reports when newer native state already stands: it is
@@ -1457,6 +1512,7 @@ fn append_observation(
     let mut prompts_problem = None;
     let mut prompts_replacement = None;
     let mut prompt_record_alone = false;
+    let mut prompts_before_lifecycle = false;
     let prepared = (|| -> Result<Option<PreparedRecordWrite>> {
         if let Some(diagnostic) = &event.observation_diagnostic {
             return Err(AttentionError {
@@ -1465,6 +1521,33 @@ fn append_observation(
             });
         }
         let Some(draft) = &event.observation else {
+            if event.provider == Some(Provider::Agy)
+                && event.continues_turn
+                && accepted(&plan.result.result)
+                && let Ok(binding_id) = event_binding_id(event, &resolved.launch_id)
+            {
+                let identity = resolved.binding(&binding_id);
+                if let Some(snapshot) = lifecycle_snapshot(&resolved.root, &identity) {
+                    let prompt_read = read_latest_prompt(&resolved.root, &identity);
+                    if let Some(recovery) = pending_agy_guard_recovery(&snapshot, &prompt_read) {
+                        let (write, restarted) = prepare_agy_guard_write(
+                            resolved,
+                            &identity,
+                            &binding_id,
+                            recovery.prompt_to_heal.as_ref(),
+                            recovery
+                                .execution_end
+                                .as_ref()
+                                .map(|(id, num)| (id.as_str(), *num)),
+                            recovery.pooled_prompt.as_ref(),
+                            false,
+                        )?;
+                        prompts_problem =
+                            restarted.then(|| started_again_diagnostic("prompt_record"));
+                        prompts_replacement = write;
+                    }
+                }
+            }
             return Ok(None);
         };
         let binding_id = event_binding_id(event, &resolved.launch_id)?;
@@ -1508,6 +1591,7 @@ fn append_observation(
             pools.requests.retention_floor_mono_ns.clone_from(&floor);
             pools.general.retention_floor_mono_ns = floor;
         }
+        let snapshot_was_lost = matches!(found, Replacing::Missing | Replacing::MovedAside);
         let mut snapshot = match found {
             Replacing::Present(value) => serde_json::from_value::<LifecycleSnapshot>(value)
                 .map_err(|_| {
@@ -1558,7 +1642,7 @@ fn append_observation(
         let pending_end = candidate.turn_end.clone();
         let lead_prompt = candidate
             .is_lead_prompt()
-            .then(|| PromptReference::of(&candidate));
+            .then(|| PromptReference::of_for(provider, &candidate));
         // Every lead prompt reaches the prompt record, the ones this file
         // will not store too: the general pool keeps one prompt per turn id,
         // and a prompt typed while a turn runs, an answer among them (see
@@ -1581,10 +1665,40 @@ fn append_observation(
                 Err(error) => prompts_problem = Some(error.diagnostic),
             }
         }
-        let recorded_prompt = ends_turn
-            .then(|| latest_prompt(&resolved.root, &identity))
+        let prompt_read = (ends_turn
+            || (provider == Provider::Agy && prompts_replacement.is_none()))
+        .then(|| read_latest_prompt(&resolved.root, &identity));
+        let recorded_prompt = prompt_read
+            .as_ref()
+            .and_then(PromptRecordRead::as_reference);
+        let agy_snapshot_lost = provider == Provider::Agy
+            && draft.actor == crate::observations::Actor::Lead
+            && lead_prompt.is_none()
+            && snapshot_was_lost
+            && recorded_prompt.is_some_and(|prompt| prompt.observed_mono_ns.as_str() < observation);
+        let pre_reduce_recovery = if provider == Provider::Agy && prompts_replacement.is_none() {
+            prompt_read
+                .as_ref()
+                .and_then(|read| pending_agy_guard_recovery(&snapshot, read))
+        } else {
+            None
+        };
+        let continued_at = ends_turn
+            .then(|| agy_continued_at(&resolved.root, &identity, provider))
             .flatten();
-        if !snapshot.reduce(candidate, recorded_prompt.as_ref())? {
+        let matches_current_turn = if ends_turn && provider == Provider::Agy {
+            prompt_read.as_ref().is_some_and(|read| {
+                agy_stop_ownership(draft, Some(&snapshot), snapshot_was_lost, read)
+                    == AgyStopOwnership::Current
+            })
+        } else {
+            false
+        };
+        if !snapshot.reduce_with_continuation(
+            candidate,
+            recorded_prompt,
+            continued_at.as_deref(),
+        )? {
             let stored = snapshot
                 .pools
                 .general
@@ -1601,21 +1715,135 @@ fn append_observation(
                     Some(stored) if stored.ends_turn(provider) => {
                         evidence.persistence.lifecycle = Persistence::Confirmed;
                         evidence.observation_id = Some(stored.observation_id.clone());
+                        evidence.observation_kind = Some(stored.body.kind().to_owned());
                         evidence.turn_end = stored.turn_end.clone();
                     }
                     Some(stored) if stored.is_lead_prompt() && prompts_replacement.is_some() => {
                         evidence.pending_observation_id = Some(draft.observation_id.clone());
+                        evidence.pending_observation_kind = Some(draft.body.kind().to_owned());
                         prompt_record_alone = true;
                     }
                     _ => evidence.persistence.lifecycle = Persistence::Rejected,
                 }
             }
+            if let Some(recovery) = pre_reduce_recovery {
+                match prepare_agy_guard_write(
+                    resolved,
+                    &identity,
+                    &binding_id,
+                    recovery.prompt_to_heal.as_ref(),
+                    recovery
+                        .execution_end
+                        .as_ref()
+                        .map(|(id, num)| (id.as_str(), *num)),
+                    recovery.pooled_prompt.as_ref(),
+                    agy_snapshot_lost,
+                ) {
+                    Ok((write, restarted)) => {
+                        prompts_replacement = write;
+                        prompts_problem =
+                            restarted.then(|| started_again_diagnostic("prompt_record"));
+                    }
+                    Err(error) => prompts_problem = Some(error.diagnostic),
+                }
+            } else if agy_snapshot_lost {
+                match prepare_agy_guard_write(
+                    resolved,
+                    &identity,
+                    &binding_id,
+                    None,
+                    None,
+                    None,
+                    true,
+                ) {
+                    Ok((write, restarted)) => {
+                        prompts_replacement = write;
+                        prompts_problem =
+                            restarted.then(|| started_again_diagnostic("prompt_record"));
+                    }
+                    Err(error) => prompts_problem = Some(error.diagnostic),
+                }
+            }
             return Ok(None);
+        }
+        let fresh_current_turn_end = ends_turn
+            && pending_end
+                .as_ref()
+                .is_some_and(|end| end.status == TurnEndStatus::Recorded)
+            && matches_current_turn;
+        let fresh_agy_ordinal = if fresh_current_turn_end
+            && let crate::observations::ObservationBody::ResponseFinished {
+                execution_num: Some(num),
+                ..
+            } = &draft.body
+            && let Some(turn_id) = draft.turn_id()
+        {
+            let pooled_prompt = latest(
+                snapshot
+                    .lead_observations()
+                    .filter(|item| item.is_lead_prompt()),
+            )
+            .map(|item| PromptReference::of_for(Provider::Agy, item));
+            let prompt_to_heal = pre_reduce_recovery
+                .as_ref()
+                .and_then(|recovery| recovery.prompt_to_heal.clone());
+            let max_num = pre_reduce_recovery
+                .as_ref()
+                .and_then(|recovery| recovery.execution_end.as_ref())
+                .filter(|(prev_turn, _)| prev_turn == turn_id)
+                .map_or(*num, |(_, prev)| (*num).max(*prev));
+            Some((turn_id.to_owned(), max_num, prompt_to_heal, pooled_prompt))
+        } else {
+            None
+        };
+        if let Some((turn_id, num, prompt_to_heal, pooled_prompt)) = fresh_agy_ordinal {
+            // Write lifecycle.json first so prompts.json never records an
+            // execution ordinal ahead of a confirmed Stop; if the second write
+            // fails, continuation and subsequent writes heal prompts.json
+            // before lifecycle.json can evict the recorded Stop.
+            let (write, restarted) = prepare_agy_guard_write(
+                resolved,
+                &identity,
+                &binding_id,
+                prompt_to_heal.as_ref(),
+                Some((&turn_id, num)),
+                pooled_prompt.as_ref(),
+                agy_snapshot_lost,
+            )?;
+            prompts_problem = restarted.then(|| started_again_diagnostic("prompt_record"));
+            prompts_replacement = write;
+        } else if pre_reduce_recovery.is_some() || agy_snapshot_lost {
+            // Either a prompt/Stop is already in lifecycle.json or
+            // lifecycle.json was just lost/rebuilt mid-execution; persist the
+            // guard into prompts.json BEFORE this write lands in lifecycle.json.
+            let (write, restarted) = prepare_agy_guard_write(
+                resolved,
+                &identity,
+                &binding_id,
+                pre_reduce_recovery
+                    .as_ref()
+                    .and_then(|r| r.prompt_to_heal.as_ref()),
+                pre_reduce_recovery
+                    .as_ref()
+                    .and_then(|r| r.execution_end.as_ref())
+                    .map(|(id, num)| (id.as_str(), *num)),
+                pre_reduce_recovery
+                    .as_ref()
+                    .and_then(|r| r.pooled_prompt.as_ref()),
+                agy_snapshot_lost,
+            )?;
+            prompts_problem = restarted.then(|| started_again_diagnostic("prompt_record"));
+            if let Some(write) = write {
+                prompts_replacement = Some(write);
+                prompts_before_lifecycle = true;
+            }
         }
         if let Some(evidence) = &resolved.evidence {
             let mut evidence = evidence.borrow_mut();
             evidence.pending_observation_id = Some(draft.observation_id.clone());
+            evidence.pending_observation_kind = Some(draft.body.kind().to_owned());
             evidence.pending_turn_end = pending_end;
+            evidence.pending_reply_transcript_attributable = fresh_current_turn_end;
         }
         let value = serde_json::to_value(snapshot).map_err(AttentionError::record_json)?;
         Ok(Some(PreparedRecordWrite::new(path, &value)?))
@@ -1636,6 +1864,7 @@ fn append_observation(
             plan.result.lifecycle_replacement = replacement;
             plan.result.prompts_replacement = prompts_replacement;
             plan.result.prompt_record_alone = prompt_record_alone;
+            plan.result.prompts_before_lifecycle = prompts_before_lifecycle;
         }
         Err(error) => {
             if let Some(evidence) = &resolved.evidence {
@@ -1809,6 +2038,64 @@ fn prepare_prompts(
     Ok((Some(PreparedRecordWrite::new(path, &value)?), restarted))
 }
 
+fn prepare_agy_guard_write(
+    resolved: &ResolvedLaunch,
+    identity: &RecordIdentity,
+    binding_id: &str,
+    prompt_to_heal: Option<&PromptReference>,
+    execution_end: Option<(&str, u64)>,
+    pooled_prompt: Option<&PromptReference>,
+    mark_history_lost: bool,
+) -> Result<(Option<PreparedRecordWrite>, bool)> {
+    let path = identity.path(&resolved.root, "lead_prompts")?;
+    let found = read_or_move_aside(&path, "lead_prompts", identity, None)?;
+    let protocol = manifest()?;
+    let restarted = matches!(found, Replacing::MovedAside);
+    let mut prompts = match found {
+        Replacing::Present(value) => {
+            serde_json::from_value(value).map_err(AttentionError::record_json)?
+        }
+        Replacing::Missing | Replacing::MovedAside => LeadPrompts::empty(
+            resolved.address.clone(),
+            &resolved.launch_id,
+            binding_id,
+            protocol.record_schema,
+        ),
+    };
+    let mut changed = false;
+    if let Some(prompt) = prompt_to_heal {
+        if prompts.record_prompt(prompt) {
+            changed = true;
+        } else if let Some(latest) = &mut prompts.latest
+            && latest.turn_id.is_none()
+            && prompt.turn_id.is_some()
+            && latest.observation_id == prompt.observation_id
+            && latest.observed_mono_ns == prompt.observed_mono_ns
+        {
+            latest.turn_id = prompt.turn_id.clone();
+            changed = true;
+        }
+    } else if prompts.latest.is_none()
+        && let Some(prompt) = pooled_prompt
+        && prompts.record_prompt(prompt)
+    {
+        changed = true;
+    }
+    if let Some((turn_id, execution_num)) = execution_end
+        && prompts.record_agy_execution_end(turn_id, execution_num, pooled_prompt)
+    {
+        changed = true;
+    }
+    if mark_history_lost && prompts.mark_execution_history_lost() {
+        changed = true;
+    }
+    if !(changed || restarted) {
+        return Ok((None, restarted));
+    }
+    let value = serde_json::to_value(&prompts).map_err(AttentionError::record_json)?;
+    Ok((Some(PreparedRecordWrite::new(path, &value)?), restarted))
+}
+
 /// What a hook reports when it moved an invalid record of `kind` aside:
 /// starting again loses what that record held.
 fn started_again_diagnostic(kind: &str) -> Diagnostic {
@@ -1821,37 +2108,44 @@ fn started_again_diagnostic(kind: &str) -> Diagnostic {
     )
 }
 
-/// Plans one change to the binding's child set, inside the launch and claim
-/// locks: reads the binding, its end and the set, applies `transition`, and
-/// adds the replacement when the set changed. The set is read through
-/// [`read_or_move_aside`]; an invalid one is replaced by a new one even when
-/// the event changes nothing, and children it held reappear at their next
-/// event. A set its readers would reject as too large is refused rather than
-/// written.
-fn plan_children(
+#[derive(Clone, Copy)]
+struct ChildTarget<'a> {
+    binding_id: &'a str,
+    binding: &'a Value,
+    binding_end: Option<Option<&'a Value>>,
+}
+
+/// Plans one or more changes to the binding's child set, inside the launch and
+/// claim locks: uses the current binding and its end (reading `binding_end`
+/// when not already loaded), reads the set, applies `transitions` to the
+/// in-memory copy, and adds the replacement only when no transition conflicts
+/// and the set changed (or an invalid set was moved aside). A set its readers
+/// would reject as too large is refused rather than written.
+fn plan_children_transitions(
     resolved: &ResolvedLaunch,
     event: &ProviderEvent,
-    binding_id: &str,
+    target: ChildTarget<'_>,
     written_at: &str,
-    transition: ChildTransition<'_>,
+    transitions: &[ChildTransition<'_>],
     replacements: &mut Vec<Replacement>,
 ) -> Result<LifecycleResult> {
-    let identity = resolved.binding(binding_id);
+    let identity = resolved.binding(target.binding_id);
     let kind = "child_presence_set";
     let path = identity.path(&resolved.root, kind)?;
-    let binding = read_record_at(&resolved.root, "binding", &identity)?.ok_or_else(|| {
-        AttentionError::new(
-            DiagnosticCode::ClaimStale,
-            "child event has no matching binding",
-        )
-    })?;
-    let end = read_record_at(&resolved.root, "binding_end", &identity)?;
+    let loaded_end;
+    let end = match target.binding_end {
+        Some(end) => end,
+        None => {
+            loaded_end = read_record_at(&resolved.root, "binding_end", &identity)?;
+            loaded_end.as_ref()
+        }
+    };
     let provider = event_provider(event)?;
     let empty = || {
         ChildPresenceSet::empty(
             resolved.address.clone(),
             &resolved.launch_id,
-            binding_id,
+            target.binding_id,
             provider,
         )
     };
@@ -1867,15 +2161,35 @@ fn plan_children(
         Replacing::Missing | Replacing::MovedAside => empty(),
     };
     set.schema = manifest()?.record_schema;
-    let reduction = set.apply(EndMark::of(end.as_ref(), &binding), transition);
-    let mut result = LifecycleResult::new(reduction.disposition);
-    result.diagnostic = reduction.diagnostic;
+    let end_mark = EndMark::of(end, target.binding);
+    let mut any_changed = false;
+    let mut disposition = Disposition::Skipped;
+    let mut diagnostic = None;
+    for (index, &transition) in transitions.iter().enumerate() {
+        let reduction = set.apply(end_mark, transition);
+        if index == 0
+            || reduction.disposition == Disposition::Conflict
+            || (reduction.changed
+                && matches!(disposition, Disposition::Skipped | Disposition::Ignored))
+        {
+            disposition = reduction.disposition;
+        }
+        any_changed |= reduction.changed;
+        if let Some(item) = reduction.diagnostic {
+            diagnostic = Some(item);
+        }
+        if reduction.disposition == Disposition::Conflict {
+            break;
+        }
+    }
+    let mut result = LifecycleResult::new(disposition);
+    result.diagnostic = diagnostic;
     // Starting again loses what the invalid set held, so the hook reports
     // that instead of anything the transition itself says.
     if started_again {
         report_instead(&mut result.diagnostic, started_again_diagnostic(kind));
     }
-    if reduction.changed || started_again {
+    if disposition != Disposition::Conflict && (any_changed || started_again) {
         set.revision = Uuid::new_v4().to_string();
         set.written_at_unix_ns = written_at.to_owned();
         let value = serde_json::to_value(&set).map_err(|_| {
@@ -1918,12 +2232,9 @@ fn apply_activity(
                 &resolved.address,
                 &resolved.launch_id,
             )?;
-            if current
-                .as_ref()
-                .and_then(|record| record.get("binding_id"))
-                .and_then(Value::as_str)
-                != Some(binding_id.as_str())
-            {
+            let Some(current_binding) = current.as_ref().filter(|record| {
+                record.get("binding_id").and_then(Value::as_str) == Some(binding_id.as_str())
+            }) else {
                 return Ok(CommitPlan::reporting(Mutation::plain(
                     LifecycleResult::diagnosed(
                         Disposition::Ignored,
@@ -1931,7 +2242,7 @@ fn apply_activity(
                         "activity event is not for the current binding",
                     ),
                 )));
-            }
+            };
             let existing = read_record(&activity_path, Some("activity"), &identity)?;
             let clear = read_record_at(&resolved.root, "activity_clear", &identity)?;
             let visible = activity_visible(
@@ -1945,17 +2256,15 @@ fn apply_activity(
             // (see `LifecycleSnapshot::repeats`), even when its hook receives a
             // later local timestamp. Keep its stored decision and leave
             // later activity and children untouched.
-            let replay = event.observation.as_ref().is_some_and(|draft| {
-                event
-                    .provider
-                    .is_some_and(|provider| draft.ends_turn(provider))
-                    && lifecycle_snapshot(&resolved.root, &identity).is_some_and(|snapshot| {
-                        snapshot.repeats_turn_end(
-                            draft,
-                            observation,
-                            latest_prompt(&resolved.root, &identity).as_ref(),
-                        )
-                    })
+            let replay = turn_end_draft(event).is_some_and(|draft| {
+                lifecycle_snapshot(&resolved.root, &identity).is_some_and(|snapshot| {
+                    snapshot.repeats_turn_end(
+                        draft,
+                        observation,
+                        latest_prompt(&resolved.root, &identity).as_ref(),
+                        agy_thinking_order(snapshot.provider, existing.as_ref(), clear.as_ref()),
+                    )
+                })
             });
             if replay {
                 let mut result = LifecycleResult::new(Disposition::Skipped);
@@ -2013,18 +2322,30 @@ fn apply_activity(
                 }
             }
             let mut base = activity_base(resolved, event, &binding_id)?;
-            // A lead tool call while the pane shows its turn's thinking keeps
-            // the notes the turn was given. Only the turn's first tool call
-            // runs the quiet checks (`tool_call_skips_check`), and a check
-            // that answers it replaces its own note, an empty answer removing
-            // it; a check that gave no answer leaves its note as it was.
+            // A lead tool call while the pane shows its turn's thinking, or a
+            // confirmed Agy intra-turn continuation/wakeup over an uncleared
+            // same-source thinking or quiet stop, keeps the quiet notes the
+            // turn was given. Only the turn's first tool call runs the quiet
+            // checks (`tool_call_skips_check`), and a check that answers it
+            // replaces its own note, an empty answer removing it; a check that
+            // gave no answer leaves its note as it was.
+            let carry_existing_notes = existing.as_ref().is_some_and(|activity| {
+                if event.source_event == "PreToolUse" {
+                    visible && activity["type"] == "thinking"
+                } else if event.continues_turn {
+                    activity["source"] == base["source"]
+                        && uncleared(activity, clear.as_ref())
+                        && ((visible && activity["type"] == "thinking")
+                            || (activity["type"] == "stop" && quiet_activity(activity)))
+                } else {
+                    false
+                }
+            });
             if event.agent_id.is_none()
-                && event.source_event == "PreToolUse"
                 && base["type"] == "thinking"
-                && visible
+                && carry_existing_notes
                 && let Some(notes) = existing
                     .as_ref()
-                    .filter(|activity| activity["type"] == "thinking")
                     .and_then(|activity| activity["hold_notes"].as_object())
             {
                 let answered = |name: &str| {
@@ -2035,23 +2356,26 @@ fn apply_activity(
                     })
                 };
                 for (name, note) in notes {
-                    if !answered(name) {
+                    if !answered(name) && note["quiet"] == true {
                         base["hold_notes"][name] = note.clone();
                     }
                 }
             }
             // A lead that waits on a sub-agent keeps calling tools, and each
             // call is thinking. While a child that asked for permission is
-            // still waiting, its notify is what the user needs to see, and
-            // the lead's next tool call is expected, not a conflict. A
-            // prompt, or anything but thinking, replaces it as usual.
+            // still waiting (and is not removed by this event's child kill or
+            // reconcile at `observation`), its notify is what the user needs to
+            // see, and the lead's next tool call is expected, not a conflict. A
+            // prompt, a call killing all waiting children, or anything but
+            // thinking replaces it as usual.
+            let child_cleanup = child_cleanup_transition(event, observation);
             let held = event.agent_id.is_none()
                 && base["type"] == "thinking"
-                && event.source_event != "UserPromptSubmit"
+                && !event.is_lead_prompt
                 && visible
-                && existing
-                    .as_ref()
-                    .is_some_and(|activity| notify_held_by_child(resolved, &binding_id, activity));
+                && existing.as_ref().is_some_and(|activity| {
+                    notify_held_by_child(resolved, &binding_id, activity, child_cleanup)
+                });
             let unseen = existing.as_ref().and_then(|existing| {
                 unseen_stop_under(
                     &resolved.root,
@@ -2082,29 +2406,39 @@ fn apply_activity(
                             }),
                     )
                 });
+            let mut loaded_end: Option<Option<Value>> = None;
             let ActivityOutcome {
                 result,
                 standing: activity,
                 written,
-            } = if event.provider.is_some_and(|provider| {
-                event
-                    .observation
-                    .as_ref()
-                    .is_some_and(|o| o.ends_turn(provider))
-            }) && (existing.as_ref().is_some_and(|a| {
-                a["observed_mono_ns"]
-                    .as_str()
-                    .is_some_and(|order| order > observation)
-            }) || newer_lead_observation(&resolved.root, &identity, observation)
-                || covered_by_clear(observation, clear.as_ref())
-                || read_record_at(&resolved.root, "binding_end", &identity)?
-                    .as_ref()
-                    .is_some_and(|end| {
-                        current
-                            .as_ref()
-                            .is_some_and(|binding| ends_binding(end, binding))
-                    }))
-            {
+            } = if let Some(draft) = turn_end_draft(event)
+                && ({
+                    let snapshot_read = read_lifecycle_snapshot(&resolved.root, &identity);
+                    let prompt_read = read_latest_prompt(&resolved.root, &identity);
+                    existing.as_ref().is_some_and(|a| {
+                        a["observed_mono_ns"]
+                            .as_str()
+                            .is_some_and(|order| order > observation)
+                    }) || has_newer_lead_observation(
+                        snapshot_read.as_ref(),
+                        prompt_read.as_reference(),
+                        observation,
+                    ) || agy_stop_superseded_by_ownership(
+                        event_provider(event)?,
+                        draft,
+                        snapshot_read.as_ref(),
+                        snapshot_read.is_unreadable(),
+                        &prompt_read,
+                    ) || covered_by_clear(observation, clear.as_ref())
+                        || {
+                            let end = read_record_at(&resolved.root, "binding_end", &identity)?;
+                            let ended = end
+                                .as_ref()
+                                .is_some_and(|end| ends_binding(end, current_binding));
+                            loaded_end = Some(end);
+                            ended
+                        }
+                }) {
                 ActivityOutcome {
                     result: turn_end_superseded(),
                     standing: existing,
@@ -2129,7 +2463,7 @@ fn apply_activity(
             // until its turn's first tool call is answered, since as of
             // Claude Code 2.1.331 a check can tell where a prompt came from
             // only then; that call, left unclaimed too, takes it away.
-            let prompt_asked = asked && event.source_event == "UserPromptSubmit";
+            let prompt_asked = asked && event.is_lead_prompt;
             let (activity, written) = match (unseen, written) {
                 (Some(stop), Some(mut record))
                     if result.disposition.as_str() == "applied"
@@ -2159,17 +2493,24 @@ fn apply_activity(
                 .map(|record| Replacement::always(activity_path.clone(), record))
                 .into_iter()
                 .collect();
-            // Only a child's permission request reaches here with an agent id.
+            // Only a child's permission request or an Agy child's blocking
+            // tool (`ask_question`) reaches here with an agent id.
             // It marks the child `waiting` in the binding's child set, which
             // only holds the notify against the lead's tool calls (see the
             // record contract's Child presence), so a set that cannot be
             // changed is reported and the notify still applies.
-            let mut children_report = Ok(None);
+            let child_target = ChildTarget {
+                binding_id: &binding_id,
+                binding: current_binding,
+                binding_end: loaded_end.as_ref().map(Option::as_ref),
+            };
+            let mut children_report: std::result::Result<Option<LifecycleResult>, Diagnostic> =
+                Ok(None);
             if let Some(agent_id) = event.agent_id.as_deref() {
                 children_report = plan_children_beside_activity(
                     resolved,
                     event,
-                    &binding_id,
+                    child_target,
                     written_at,
                     ChildTransition::Permission {
                         agent_id,
@@ -2177,7 +2518,8 @@ fn apply_activity(
                         order: observation,
                     },
                     &mut replacements,
-                );
+                )
+                .map(Some);
             }
             // A Codex parent's stop ends the children it covers. The stop is
             // the lead's own activity, so a set it cannot change is reported
@@ -2192,7 +2534,7 @@ fn apply_activity(
                 children_report = plan_children_beside_activity(
                     resolved,
                     event,
-                    &binding_id,
+                    child_target,
                     written_at,
                     ChildTransition::ParentClear {
                         order: surviving_activity["observed_mono_ns"]
@@ -2201,35 +2543,53 @@ fn apply_activity(
                         event_id: surviving_activity["event_id"].as_str().unwrap_or(""),
                     },
                     &mut replacements,
-                );
+                )
+                .map(Some);
             }
-            // A Claude lead's stop carries the tasks the provider still runs,
-            // so a counted child it no longer lists ended without a stop of
-            // its own. The stop is the lead's own activity: a set it cannot
-            // change is reported and the stop still applies.
-            if let Some(in_flight) = event.in_flight_task_ids.as_deref()
-                && !matches!(result.disposition.as_str(), "ignored" | "conflict")
-            {
+            // A lead stop carries the tasks the provider still runs (or an
+            // empty list on a fully idle `agy` stop or `manage_subagents`
+            // `kill_all`), and `manage_subagents kill` names specific child
+            // ids. For admitted `PostToolUse` `manage_subagents` results, run
+            // child cleanup even when the proposed `thinking` activity was
+            // ignored against a held or newer activity so per-child ordering
+            // in `children.json` still removes killed children without
+            // overwriting the standing activity.
+            let post_tool_ignored =
+                event.source_event == "PostToolUse" && result.disposition == Disposition::Ignored;
+            let run_child_cleanup =
+                !matches!(result.disposition.as_str(), "ignored" | "conflict") || post_tool_ignored;
+            if run_child_cleanup && let Some(transition) = child_cleanup {
                 children_report = plan_children_beside_activity(
                     resolved,
                     event,
-                    &binding_id,
+                    child_target,
                     written_at,
-                    ChildTransition::Reconcile {
-                        order: observation,
-                        in_flight,
-                    },
+                    transition,
                     &mut replacements,
-                );
+                )
+                .map(Some);
             }
+            let mut result = result;
             let (refused, diagnostic) = match children_report {
-                Ok(diagnostic) => (false, diagnostic),
+                Ok(Some(child_result)) => {
+                    if post_tool_ignored && child_result.disposition == Disposition::Applied {
+                        result.disposition = Disposition::Applied;
+                        result.diagnostic = None;
+                        if result.event_id.is_none() {
+                            result.event_id = child_result.event_id;
+                        }
+                        if let Some(evidence) = &resolved.evidence {
+                            evidence.borrow_mut().activity_refused = true;
+                        }
+                    }
+                    (false, child_result.diagnostic)
+                }
+                Ok(None) => (false, None),
                 Err(diagnostic) => (true, Some(diagnostic)),
             };
             // What the child set reports, a restart included, replaces the
             // activity's own diagnostic, and a lifecycle failure that
             // append_observation records replaces both, as in apply_child.
-            let mut result = result;
             if let Some(diagnostic) = diagnostic {
                 report_instead(&mut result.diagnostic, diagnostic);
             }
@@ -2262,24 +2622,24 @@ fn apply_activity(
 /// Plans a child-set change that an activity carries, adding its
 /// replacement only when it applies. The activity stands whatever happens to
 /// the set. What the change reports comes back beside it: `Ok` with the
-/// diagnostic plan_children reports (a restart's, or else the transition's
-/// own), or `Err` when the set could not be planned or the transition
-/// conflicts with it, which makes an accepted activity's hook partial.
+/// child-set `LifecycleResult`, or `Err` when the set could not be planned or
+/// the transition conflicts with it, which makes an accepted activity's hook
+/// partial.
 fn plan_children_beside_activity(
     resolved: &ResolvedLaunch,
     event: &ProviderEvent,
-    binding_id: &str,
+    target: ChildTarget<'_>,
     written_at: &str,
     transition: ChildTransition<'_>,
     replacements: &mut Vec<Replacement>,
-) -> std::result::Result<Option<Diagnostic>, Diagnostic> {
+) -> std::result::Result<LifecycleResult, Diagnostic> {
     let mut planned = Vec::new();
-    match plan_children(
+    match plan_children_transitions(
         resolved,
         event,
-        binding_id,
+        target,
         written_at,
-        transition,
+        &[transition],
         &mut planned,
     ) {
         Ok(child) if child.disposition == Disposition::Conflict => {
@@ -2292,7 +2652,7 @@ fn plan_children_beside_activity(
         }
         Ok(child) => {
             replacements.extend(planned);
-            Ok(child.diagnostic)
+            Ok(child)
         }
         Err(error) => Err(error.diagnostic),
     }
@@ -2328,9 +2688,21 @@ fn apply_observed_outputs_with(
             let mut evidence = cell.borrow_mut();
             evidence.persistence.lifecycle = Persistence::Confirmed;
             evidence.observation_id = evidence.pending_observation_id.clone();
+            evidence.observation_kind = evidence.pending_observation_kind.clone();
             evidence.turn_end = evidence.pending_turn_end.clone();
+            evidence.reply_transcript_attributable = evidence.pending_reply_transcript_attributable;
         }
     };
+    if mutation.prompts_before_lifecycle {
+        if let Some(prompts) = &mutation.prompts_replacement {
+            replace(prompts).map_err(unconfirmed("prompts_write"))?;
+        }
+        if let Some(replacement) = &mutation.lifecycle_replacement {
+            replace(replacement).map_err(unconfirmed("lifecycle_write"))?;
+            confirm_pending();
+        }
+        return Ok(());
+    }
     if let Some(replacement) = &mutation.lifecycle_replacement {
         replace(replacement).map_err(unconfirmed("lifecycle_write"))?;
         confirm_pending();
@@ -2923,22 +3295,34 @@ fn apply_child(
     let agent_id = event.agent_id.as_deref().ok_or_else(|| {
         AttentionError::new(DiagnosticCode::RecordInvalid, "child event has no agent id")
     })?;
-    let transition = match (event.action, event.source_event.as_str()) {
-        (ProviderAction::ChildStopped, _) => ChildTransition::Stop {
-            agent_id,
+    let self_killed = event.source_event == "PostToolUse"
+        && event.stopped_child_ids.iter().any(|id| id == agent_id);
+    let mut transitions = Vec::new();
+    if !self_killed {
+        let transition = match (event.action, event.source_event.as_str()) {
+            (ProviderAction::ChildStopped, _) => ChildTransition::Stop {
+                agent_id,
+                order: observation,
+            },
+            (_, "SubagentStart" | "SessionStart") => ChildTransition::Start {
+                agent_id,
+                agent_type: event.agent_type.as_deref(),
+                order: observation,
+            },
+            _ => ChildTransition::Tool {
+                agent_id,
+                agent_type: event.agent_type.as_deref(),
+                order: observation,
+            },
+        };
+        transitions.push(transition);
+    }
+    if !event.stopped_child_ids.is_empty() {
+        transitions.push(ChildTransition::StopIds {
+            agent_ids: &event.stopped_child_ids,
             order: observation,
-        },
-        (_, "SubagentStart") => ChildTransition::Start {
-            agent_id,
-            agent_type: event.agent_type.as_deref(),
-            order: observation,
-        },
-        _ => ChildTransition::Tool {
-            agent_id,
-            agent_type: event.agent_type.as_deref(),
-            order: observation,
-        },
-    };
+        });
+    }
     let (mutation, ()) = commit(
         &resolved.root,
         &[&resolved.launch_lock(), &resolved.claim_lock()],
@@ -2948,7 +3332,7 @@ fn apply_child(
             if let Some(lapsed) = resolved.lapsed_now()? {
                 return Ok(CommitPlan::reporting(Mutation::plain(lapsed)));
             }
-            if binding.is_none() {
+            let Some(binding) = binding.as_ref() else {
                 return Ok(CommitPlan::reporting(Mutation::plain(
                     LifecycleResult::diagnosed(
                         Disposition::Ignored,
@@ -2956,14 +3340,18 @@ fn apply_child(
                         "child event has no matching binding",
                     ),
                 )));
-            }
+            };
             let mut replacements = Vec::new();
-            let result = plan_children(
+            let result = plan_children_transitions(
                 resolved,
                 event,
-                &binding_id,
+                ChildTarget {
+                    binding_id: &binding_id,
+                    binding,
+                    binding_end: None,
+                },
                 written_at,
-                transition,
+                &transitions,
                 &mut replacements,
             )?;
             Ok(append_observation(
@@ -3160,7 +3548,8 @@ fn activity_clear_plan(
 }
 
 // Pi's bus `clear` withdraws both its activity and its review. A Codex
-// interrupt withdraws only the activity: the review belongs to another writer.
+// interrupt or Agy `USER_CANCELED` Stop withdraws only the activity: the review
+// belongs to another writer.
 fn apply_clear_event(
     resolved: &ResolvedLaunch,
     event: &ProviderEvent,
@@ -3194,32 +3583,66 @@ fn apply_clear_event(
             &resolved.address,
             &resolved.launch_id,
         )?;
-        if current
-            .as_ref()
-            .and_then(|record| record.get("binding_id"))
-            .and_then(Value::as_str)
-            != Some(binding_id.as_str())
-        {
+        let Some(current_binding) = current.as_ref().filter(|record| {
+            record.get("binding_id").and_then(Value::as_str) == Some(binding_id.as_str())
+        }) else {
             return ignored("clear event is not for the current binding");
-        }
-        if event.provider.is_some_and(|provider| {
-            event
-                .observation
-                .as_ref()
-                .is_some_and(|o| o.ends_turn(provider))
-        }) {
+        };
+        let mut loaded_end: Option<Option<Value>> = None;
+        if let Some(draft) = turn_end_draft(event) {
             let identity = resolved.binding(&binding_id);
+            let snapshot_read = read_lifecycle_snapshot(&resolved.root, &identity);
+            let mut prompt_loaded: Option<PromptRecordRead> = None;
+            // A replayed turn-ending clear (such as a repeated USER_CANCELED
+            // Stop or Codex Interrupt) must not write a fresh clear watermark
+            // over a newer turn's activity.
+            if let Some(snapshot) = snapshot_read.as_ref() {
+                let prompt = prompt_loaded
+                    .get_or_insert_with(|| read_latest_prompt(&resolved.root, &identity))
+                    .as_reference();
+                if snapshot.repeats_turn_end(draft, observation, prompt, None) {
+                    let existing_clear =
+                        read_record_at(&resolved.root, "activity_clear", &identity)?;
+                    let mut result = LifecycleResult::new(Disposition::Skipped);
+                    result.event_id = existing_clear
+                        .as_ref()
+                        .and_then(|record| record["event_id"].as_str())
+                        .map(str::to_owned);
+                    return Ok(append_observation(
+                        resolved,
+                        event,
+                        observation,
+                        written_at,
+                        CommitPlan::reporting(Mutation::plain(result)),
+                    ));
+                }
+            }
             let activity = read_record_at(&resolved.root, "activity", &identity)?;
             let end = read_record_at(&resolved.root, "binding_end", &identity)?;
+            let ended = end
+                .as_ref()
+                .is_some_and(|end| ends_binding(end, current_binding));
+            loaded_end = Some(end);
+            let prompt_read =
+                prompt_loaded.get_or_insert_with(|| read_latest_prompt(&resolved.root, &identity));
             if activity.as_ref().is_some_and(|a| {
                 a["observed_mono_ns"]
                     .as_str()
                     .is_some_and(|order| order > observation)
-            }) || end.as_ref().is_some_and(|end| {
-                current
-                    .as_ref()
-                    .is_some_and(|binding| ends_binding(end, binding))
-            }) {
+            }) || ended
+                || has_newer_lead_observation(
+                    snapshot_read.as_ref(),
+                    prompt_read.as_reference(),
+                    observation,
+                )
+                || agy_stop_superseded_by_ownership(
+                    event_provider(event)?,
+                    draft,
+                    snapshot_read.as_ref(),
+                    snapshot_read.is_unreadable(),
+                    prompt_read,
+                )
+            {
                 return Ok(append_observation(
                     resolved,
                     event,
@@ -3238,6 +3661,40 @@ fn apply_clear_event(
             &binding_id,
             observation,
         )?;
+        let mut replacements: Vec<_> = replacement.into_iter().collect();
+        let mut refused = false;
+        if let Some(in_flight) = event.in_flight_task_ids.as_deref()
+            && !matches!(result.disposition.as_str(), "ignored" | "conflict")
+        {
+            match plan_children_beside_activity(
+                resolved,
+                event,
+                ChildTarget {
+                    binding_id: &binding_id,
+                    binding: current_binding,
+                    binding_end: loaded_end.as_ref().map(Option::as_ref),
+                },
+                written_at,
+                ChildTransition::Reconcile {
+                    order: observation,
+                    in_flight,
+                },
+                &mut replacements,
+            ) {
+                Ok(child) => {
+                    if let Some(diagnostic) = child.diagnostic {
+                        report_instead(&mut result.diagnostic, diagnostic);
+                    }
+                }
+                Err(diagnostic) => {
+                    refused = true;
+                    report_instead(&mut result.diagnostic, diagnostic);
+                    if let Some(evidence) = &resolved.evidence {
+                        evidence.borrow_mut().native_refused = true;
+                    }
+                }
+            }
+        }
         let mut removals = Vec::new();
         if result.disposition != Disposition::Ignored
             && let Some(review_path) = &review_path
@@ -3247,17 +3704,21 @@ fn apply_clear_event(
             }
             removals.push(review_path.clone());
         }
-        Ok(append_observation(
+        let mut plan = append_observation(
             resolved,
             event,
             observation,
             written_at,
             CommitPlan {
-                replacements: replacement.into_iter().collect(),
+                replacements,
                 removals,
                 ..CommitPlan::reporting(Mutation::plain(result))
             },
-        ))
+        );
+        if refused && accepted(&plan.result.result) {
+            plan.result.result.disposition = Disposition::Partial;
+        }
+        Ok(plan)
     };
     let after_apply = |mutation: &Mutation| apply_observed_outputs(resolved, &binding_id, mutation);
     let (launch_lock, claim_lock) = (resolved.launch_lock(), resolved.claim_lock());
@@ -3415,10 +3876,15 @@ fn apply_provider_event_with_request(
         admission: None,
         planned_native: None,
         native_refused: false,
+        activity_refused: false,
         pending_observation_id: None,
         observation_id: None,
+        pending_observation_kind: None,
+        observation_kind: None,
         pending_turn_end: None,
         turn_end: None,
+        pending_reply_transcript_attributable: false,
+        reply_transcript_attributable: false,
         quiet_snapshot: None,
         hold_checks: request
             .map(|r| {
@@ -3468,9 +3934,68 @@ fn apply_provider_event_with_request(
         admission: evidence.admission.clone(),
         persistence: evidence.persistence.clone(),
         observation_id: evidence.observation_id.clone(),
+        observation_kind: evidence.observation_kind.clone(),
         turn_end: evidence.turn_end.clone(),
         hold_checks: evidence.hold_checks.clone(),
         muted,
+        reply_transcript_attributable: evidence.reply_transcript_attributable,
+    }
+}
+
+enum LazyBind {
+    Unneeded,
+    Bound {
+        written_at: String,
+        host_diagnostic: Option<Diagnostic>,
+    },
+    Refused(LifecycleResult),
+}
+
+/// Lazily bind an `agy` lead session on `PreInvocation` when no active binding
+/// exists for `conversationId` yet (as of `agy` 1.5.16, `agy --resume <id>`
+/// skips `SessionStart` and begins on `PreInvocation`).
+///
+/// Returns `LazyBind::Refused` if creating or replacing the binding was refused
+/// (such as a foreign `agy` process attempting to replace another active
+/// binding), so the caller aborts without running checks or writing activity.
+fn ensure_lazy_binding(
+    resolved: &ResolvedLaunch,
+    event: &ProviderEvent,
+    observation: &str,
+    clock: &dyn crate::wezterm::Clock,
+) -> Result<LazyBind> {
+    if !event.lazy_binding {
+        return Ok(LazyBind::Unneeded);
+    }
+    let binding_id = event_binding_id(event, &resolved.launch_id)?;
+    let pointer = read_record_at(&resolved.root, "current_binding", &resolved.launch())?;
+    if pointer
+        .as_ref()
+        .and_then(|record| record["binding_id"].as_str())
+        == Some(binding_id.as_str())
+    {
+        return Ok(LazyBind::Unneeded);
+    }
+    let written_at = clock.unix_ns20()?;
+    let mut binding_resolved = resolved.clone();
+    binding_resolved.evidence = None;
+    let binding_event = ProviderEvent {
+        action: ProviderAction::Binding,
+        start_source: Some("unspecified".to_owned()),
+        observation: None,
+        observation_diagnostic: None,
+        ..event.clone()
+    };
+    let result =
+        binding_mutation(&binding_resolved, &binding_event, observation, &written_at)?.result;
+    if accepted(&result) {
+        let host_diagnostic = record_host(&binding_resolved, &binding_event, &written_at);
+        Ok(LazyBind::Bound {
+            written_at,
+            host_diagnostic,
+        })
+    } else {
+        Ok(LazyBind::Refused(result))
     }
 }
 
@@ -3505,6 +4030,15 @@ fn apply_provider_event_inner(
         Err(error) => return Ok(LifecycleResult::ignored_error(error)),
     };
     resolved.evidence = evidence;
+    let (bound_at, lazy_host_diagnostic) =
+        match ensure_lazy_binding(&resolved, event, observation, ports.clock)? {
+            LazyBind::Unneeded => (None, None),
+            LazyBind::Bound {
+                written_at,
+                host_diagnostic,
+            } => (Some(written_at), host_diagnostic),
+            LazyBind::Refused(refused) => return Ok(refused),
+        };
     if let Some(request) = request {
         // Whether the pane's activity is still shown, before the checks: a
         // clock that cannot be read counts it as inside any time limit.
@@ -3514,7 +4048,10 @@ fn apply_provider_event_inner(
             evidence.borrow_mut().hold_checks = outcomes;
         }
     }
-    let written_at = ports.clock.unix_ns20()?;
+    let written_at = match bound_at {
+        Some(ts) if request.is_none() => ts,
+        _ => ports.clock.unix_ns20()?,
+    };
     let result = match event.action {
         ProviderAction::Observation => {
             apply_observation(&resolved, event, observation, &written_at)
@@ -3548,14 +4085,19 @@ fn apply_provider_event_inner(
                 .clone()
                 .or_else(|| resolved.publication_diagnostic.clone());
         }
-        if accepted(&result)
-            && let Some(problem) = record_host(&resolved, event, &written_at)
-        {
-            report_instead(&mut result.diagnostic, problem);
+        if accepted(&result) {
+            if let Some(problem) = lazy_host_diagnostic {
+                report_instead(&mut result.diagnostic, problem);
+            }
+            if let Some(problem) = record_host(&resolved, event, &written_at) {
+                report_instead(&mut result.diagnostic, problem);
+            }
         }
         // A follower that could not start leaves the hook's record as written,
         // and says so only where nothing else is reported.
-        if let Some(problem) = start_turn_follower(&resolved, event, env, ports) {
+        if let Some(problem) =
+            start_turn_follower(&resolved, event, observation, accepted(&result), env, ports)
+        {
             result.diagnostic.get_or_insert(problem);
         }
         result
@@ -3567,8 +4109,9 @@ fn apply_provider_event_inner(
 /// a model error runs no hook, and only the session rollout says it ended; the
 /// follower reads it from where the rollout stands now. As of Claude Code
 /// 2.1.300 a turn the user stops with Esc runs no hook, and the host's status
-/// file shows it. A follower needs the hook's proof of its host, because it
-/// lives no longer than that process.
+/// file shows it. As of `agy` 1.5.16 a turn the user stops with Esc runs no
+/// `Stop` hook, and its local SQLite status databases show it. A follower needs
+/// the hook's proof of its host, because it lives no longer than that process.
 ///
 /// A lead Codex prompt starts one, which waits for a follower that holds the
 /// binding's follower lock to leave or to name the prompt's turn. Any other
@@ -3578,21 +4121,39 @@ fn apply_provider_event_inner(
 /// on to each later turn. A Codex follower starts whatever the hook's
 /// disposition: a prompt whose thinking lost the activity slot still began its
 /// turn, and the follower writes only for a turn the binding recorded or one
-/// it carried into. A Claude follower follows a prompt, whether or not it
-/// carries a turn id, and starts only once the prompt record names it as the
-/// lead's latest prompt: it ends the turn only while that holds. A
-/// `CLAUDE_CONFIG_DIR` the hook could not keep starts none, since the status
-/// file is in that directory, not in `~/.claude`.
+/// it carried into. A Claude or Agy follower follows a prompt, whether or not
+/// it carries a turn id, and starts only once the prompt record names it as the
+/// lead's latest prompt: it ends the turn only while that holds. On Agy, each
+/// follower is also scoped to the invocation timestamp that started it; an
+/// accepted lead continuation or wakeup `PreInvocation` starts a replacement
+/// follower whenever no follower holds the lock for an invocation after the
+/// prompt's latest turn end. A `CLAUDE_CONFIG_DIR` the hook could not keep
+/// starts no Claude follower, since the status file is in that directory, not
+/// in `~/.claude`; an Agy prompt derives `<appDataDir>` from
+/// `transcriptPath`'s `brain/` ancestor or falls back to
+/// `$HOME/.gemini/antigravity-cli`, starting no follower when neither gives an
+/// absolute directory.
 fn start_turn_follower(
     resolved: &ResolvedLaunch,
     event: &ProviderEvent,
+    event_observation: &str,
+    event_accepted: bool,
     env: &BTreeMap<String, String>,
     ports: &RuntimePorts<'_>,
 ) -> Option<Diagnostic> {
-    let observation = event.observation.as_ref()?;
+    let observation = event.observation.as_ref();
     let host = &resolved.host.as_ref()?.proof.owner;
+    let confirmed_latest_prompt = |obs: &LifecycleObservation| {
+        if !obs.is_lead_prompt() {
+            return None;
+        }
+        let binding_id = event_binding_id(event, &resolved.launch_id).ok()?;
+        latest_prompt(&resolved.root, &resolved.binding(&binding_id))
+            .filter(|latest| latest.observation_id == obs.observation_id)
+    };
     let turn = match event.provider? {
         Provider::Codex => {
+            let observation = observation?;
             if observation.actor != crate::observations::Actor::Lead {
                 return None;
             }
@@ -3620,9 +4181,6 @@ fn start_turn_follower(
             })
         }
         Provider::Claude => {
-            if !observation.is_lead_prompt() {
-                return None;
-            }
             if event.config_dir.is_none()
                 && env
                     .get("CLAUDE_CONFIG_DIR")
@@ -3630,9 +4188,7 @@ fn start_turn_follower(
             {
                 return None;
             }
-            let binding_id = event_binding_id(event, &resolved.launch_id).ok()?;
-            let latest = latest_prompt(&resolved.root, &resolved.binding(&binding_id))
-                .filter(|latest| latest.observation_id == observation.observation_id)?;
+            let latest = confirmed_latest_prompt(observation?)?;
             let status_file = crate::claude_status::status_path(
                 event.config_dir.as_deref(),
                 env.get("HOME").map(String::as_str),
@@ -3642,6 +4198,65 @@ fn start_turn_follower(
                 prompt_observation_id: latest.observation_id,
                 prompt_observed_mono_ns: latest.observed_mono_ns,
                 status_file: status_file.display().to_string(),
+            })
+        }
+        Provider::Agy => {
+            let (latest, invocation_observed_mono_ns) = if let Some(obs) =
+                observation.filter(|obs| obs.is_lead_prompt())
+            {
+                let latest = confirmed_latest_prompt(obs)?;
+                let stamp = latest.observed_mono_ns.clone();
+                (latest, stamp)
+            } else if event_accepted
+                && event.source_event == "PreInvocation"
+                && event.agent_id.is_none()
+                && event.activity_type.as_deref() == Some("thinking")
+            {
+                let binding_id = event_binding_id(event, &resolved.launch_id).ok()?;
+                let identity = resolved.binding(&binding_id);
+                let latest = latest_prompt(&resolved.root, &identity)?;
+                let last_end = lifecycle_snapshot(&resolved.root, &identity).and_then(|snapshot| {
+                    snapshot
+                        .lead_observations()
+                        .filter(|item| {
+                            item.observed_mono_ns.as_str() > latest.observed_mono_ns.as_str()
+                                && ends_agy_invocation(item)
+                        })
+                        .map(|item| item.observed_mono_ns.clone())
+                        .max()
+                });
+                let covered = crate::turn_follower::followed_key(&turn_follower_lock(
+                    &resolved.root,
+                    &resolved.address,
+                    &resolved.launch_id,
+                    &binding_id,
+                ))
+                .is_some_and(|key| {
+                    key.strip_prefix(&latest.observation_id)
+                        .and_then(|rest| rest.strip_prefix(':'))
+                        .is_some_and(|stamp| last_end.as_deref().is_none_or(|end| stamp > end))
+                });
+                if covered {
+                    return None;
+                }
+                (latest, event_observation.to_owned())
+            } else {
+                return None;
+            };
+            let (summaries_db, conv_db) = crate::agy_status::status_db_paths(
+                event.transcript_path.as_deref(),
+                env.get("HOME").map(String::as_str),
+                event
+                    .initial_step_count
+                    .and(event.provider_session_id.as_deref()),
+            )?;
+            FollowedTurn::Agy(AgyTurn {
+                prompt_observation_id: latest.observation_id,
+                prompt_observed_mono_ns: latest.observed_mono_ns,
+                invocation_observed_mono_ns,
+                summaries_db: summaries_db.display().to_string(),
+                conv_db: conv_db.map(|path| path.display().to_string()),
+                initial_step_count: event.initial_step_count.unwrap_or(0),
             })
         }
         Provider::Pi => return None,
@@ -3926,6 +4541,19 @@ pub(crate) fn record_codex_turn_failure(
     Ok(mutation.result)
 }
 
+/// The stored identity of a lead prompt followed by a prompt-keyed turn
+/// follower (Claude Code status file or Antigravity CLI status databases).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PromptTurn<'a> {
+    pub(crate) observation_id: &'a str,
+    pub(crate) observed_mono_ns: &'a str,
+    pub(crate) invocation_observed_mono_ns: Option<&'a str>,
+    /// For Agy followers: true when the provider's conversation DB recorded an
+    /// explicit canceled step (`Reading::Canceled`) rather than an ambiguous
+    /// `Working -> Idle` transition (`Reading::Idle`).
+    pub(crate) confirmed_canceled: bool,
+}
+
 /// Whether the lead's latest prompt in the binding `binding_id` is the
 /// prompt `turn` follows. A prompt record that cannot be read names no
 /// prompt. A follower reads it without locks; its write reads it again under
@@ -3935,49 +4563,508 @@ pub(crate) fn latest_prompt_is(
     address: &PaneAddress,
     launch_id: &str,
     binding_id: &str,
-    turn: &ClaudeTurn,
+    turn: PromptTurn<'_>,
 ) -> bool {
     latest_prompt(
         root,
         &RecordIdentity::binding(address, launch_id, binding_id),
     )
     .is_some_and(|latest| {
-        latest.observation_id == turn.prompt_observation_id
-            && latest.observed_mono_ns == turn.prompt_observed_mono_ns
+        latest.observation_id == turn.observation_id
+            && latest.observed_mono_ns == turn.observed_mono_ns
     })
+}
+
+/// Whether `item` is an effective Agy lead turn-ending observation. A `Stop`
+/// persisted as `TurnEndStatus::Superseded` is kept only as history and must
+/// not retire an active invocation's follower.
+fn ends_agy_invocation(item: &LifecycleObservation) -> bool {
+    item.ends_turn(Provider::Agy)
+        && item
+            .turn_end
+            .as_ref()
+            .is_none_or(|end| end.status != TurnEndStatus::Superseded)
+}
+
+/// Whether an effective lead turn-ending observation has already been recorded
+/// after `invocation_observed_mono_ns`, so an Agy follower for that invocation
+/// must exit and must not apply a stale status sample to a later continuation.
+pub(crate) fn agy_invocation_ended(
+    root: &Path,
+    address: &PaneAddress,
+    launch_id: &str,
+    binding_id: &str,
+    invocation_observed_mono_ns: &str,
+) -> bool {
+    let identity = RecordIdentity::binding(address, launch_id, binding_id);
+    lifecycle_snapshot(root, &identity).is_some_and(|snapshot| {
+        snapshot.lead_observations().any(|item| {
+            item.observed_mono_ns.as_str() > invocation_observed_mono_ns
+                && ends_agy_invocation(item)
+        })
+    })
+}
+
+/// Whether lifecycle history was lost for the active Agy prompt (so a genuine
+/// normal `Stop` may be suppressed as `Unknown` and an ambiguous `Idle` status
+/// sample must not be recorded as an Esc interrupt).
+pub(crate) fn agy_execution_history_lost(
+    root: &Path,
+    address: &PaneAddress,
+    launch_id: &str,
+    binding_id: &str,
+) -> bool {
+    let identity = RecordIdentity::binding(address, launch_id, binding_id);
+    match read_latest_prompt(root, &identity) {
+        PromptRecordRead::Present {
+            execution_history_lost: true,
+            ..
+        }
+        | PromptRecordRead::Unreadable => true,
+        PromptRecordRead::Present {
+            latest: Some(_), ..
+        } => !matches!(
+            read_lifecycle_snapshot(root, &identity),
+            SnapshotRead::Present(_)
+        ),
+        PromptRecordRead::Present { latest: None, .. } | PromptRecordRead::Missing => false,
+    }
+}
+
+enum SnapshotRead {
+    Present(Box<LifecycleSnapshot>),
+    Missing,
+    Unreadable,
+}
+
+impl SnapshotRead {
+    fn as_ref(&self) -> Option<&LifecycleSnapshot> {
+        match self {
+            Self::Present(snapshot) => Some(snapshot),
+            Self::Missing | Self::Unreadable => None,
+        }
+    }
+
+    fn is_unreadable(&self) -> bool {
+        matches!(self, Self::Unreadable)
+    }
+}
+
+fn read_lifecycle_snapshot(root: &Path, identity: &RecordIdentity) -> SnapshotRead {
+    match read_record_at(root, "lifecycle_snapshot", identity) {
+        Ok(None) => SnapshotRead::Missing,
+        Ok(Some(value)) => match serde_json::from_value(value) {
+            Ok(snapshot) => SnapshotRead::Present(Box::new(snapshot)),
+            Err(_) => SnapshotRead::Unreadable,
+        },
+        Err(_) => SnapshotRead::Unreadable,
+    }
 }
 
 /// The lead's lifecycle snapshot of the binding `identity` names; `None` when
 /// there is none or it cannot be read.
 fn lifecycle_snapshot(root: &Path, identity: &RecordIdentity) -> Option<LifecycleSnapshot> {
-    read_record_at(root, "lifecycle_snapshot", identity)
-        .ok()
-        .flatten()
-        .and_then(|value| serde_json::from_value(value).ok())
+    match read_lifecycle_snapshot(root, identity) {
+        SnapshotRead::Present(snapshot) => Some(*snapshot),
+        SnapshotRead::Missing | SnapshotRead::Unreadable => None,
+    }
+}
+
+enum PromptRecordRead {
+    Present {
+        latest: Option<PromptReference>,
+        last_execution_num: Option<u64>,
+        execution_history_lost: bool,
+    },
+    Missing,
+    Unreadable,
+}
+
+impl PromptRecordRead {
+    fn as_reference(&self) -> Option<&PromptReference> {
+        match self {
+            Self::Present { latest, .. } => latest.as_ref(),
+            Self::Missing | Self::Unreadable => None,
+        }
+    }
+
+    fn last_execution_num(&self) -> Option<u64> {
+        match self {
+            Self::Present {
+                last_execution_num, ..
+            } => *last_execution_num,
+            Self::Missing | Self::Unreadable => None,
+        }
+    }
+
+    fn execution_history_lost(&self) -> bool {
+        match self {
+            Self::Present {
+                execution_history_lost,
+                ..
+            } => *execution_history_lost,
+            Self::Missing | Self::Unreadable => false,
+        }
+    }
+}
+
+fn read_latest_prompt(root: &Path, identity: &RecordIdentity) -> PromptRecordRead {
+    match read_record_at(root, "lead_prompts", identity) {
+        Ok(None) => PromptRecordRead::Missing,
+        Ok(Some(value)) => match serde_json::from_value::<LeadPrompts>(value) {
+            Ok(prompts) => PromptRecordRead::Present {
+                latest: prompts.latest,
+                last_execution_num: prompts.last_execution_num,
+                execution_history_lost: prompts.execution_history_lost,
+            },
+            Err(_) => PromptRecordRead::Unreadable,
+        },
+        Err(_) => PromptRecordRead::Unreadable,
+    }
 }
 
 /// The lead's latest prompt, from the binding's prompt record; `None` when
 /// the record names none or cannot be read.
 fn latest_prompt(root: &Path, identity: &RecordIdentity) -> Option<PromptReference> {
-    read_record_at(root, "lead_prompts", identity)
-        .ok()
-        .flatten()
-        .and_then(|value| serde_json::from_value::<LeadPrompts>(value).ok())
-        .and_then(|prompts| prompts.latest)
+    match read_latest_prompt(root, identity) {
+        PromptRecordRead::Present { latest, .. } => latest,
+        PromptRecordRead::Missing | PromptRecordRead::Unreadable => None,
+    }
 }
 
-/// Record that the user stopped the Claude Code lead turn `turn` follows, from
-/// `event`, which [`ProviderEvent::claude_turn_interrupt`] made for it, and
-/// clear the activity. As of Claude Code 2.1.300 pressing Esc runs no hook;
-/// the follower saw the session's status file go from working to no turn (see
-/// [`crate::claude_status`]). It holds the scope and the host it was handed and
-/// checks both again under the launch and claim locks, as `apply_activity`
-/// takes them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AgyStopOwnership {
+    /// Positive match between the Stop's `executionId` and the current turn's
+    /// lead prompt boundary: may transition activity, run Stop checks, retire
+    /// the follower, and fall back to the transcript tail for `--include-reply`.
+    Current,
+    /// Genuine no-ID turn with intact history (or a fresh binding before any
+    /// prompt with no conflicting execution): may transition activity, run Stop
+    /// checks, and retire the follower, but never reads transcript fallback.
+    Anonymous,
+    /// Proven to belong to an older or different execution than the current turn.
+    Stale,
+    /// Ownership cannot be established (unreadable prompt or lifecycle record,
+    /// missing ID on an identified turn, or evicted history without a matching
+    /// current prompt): must not change activity, clear it, run Stop checks,
+    /// retire a follower, or read transcript fallback.
+    Unknown,
+}
+
+struct EffectiveAgyPrompt {
+    prompt: PromptReference,
+    last_execution_num: Option<u64>,
+    execution_history_lost: bool,
+    prompt_behind_snapshot: bool,
+}
+
+fn effective_agy_prompt(
+    usable_snapshot: Option<&LifecycleSnapshot>,
+    history_lost: bool,
+    prompt_read: &PromptRecordRead,
+) -> Option<EffectiveAgyPrompt> {
+    if matches!(prompt_read, PromptRecordRead::Unreadable) {
+        return None;
+    }
+    let pooled_prompt = usable_snapshot.and_then(|snapshot| {
+        latest(
+            snapshot
+                .lead_observations()
+                .filter(|item| item.is_lead_prompt()),
+        )
+    });
+    match (prompt_read.as_reference(), pooled_prompt) {
+        (Some(recorded), Some(pooled))
+            if pooled.observed_mono_ns.as_str() > recorded.observed_mono_ns.as_str() =>
+        {
+            Some(EffectiveAgyPrompt {
+                prompt: PromptReference::of_for(Provider::Agy, pooled),
+                last_execution_num: None,
+                execution_history_lost: false,
+                prompt_behind_snapshot: true,
+            })
+        }
+        (Some(recorded), Some(pooled))
+            if recorded.turn_id.is_none()
+                && pooled.observation_id == recorded.observation_id
+                && pooled.observed_mono_ns == recorded.observed_mono_ns =>
+        {
+            let prompt = PromptReference::of_for(Provider::Agy, pooled);
+            let prompt_behind_snapshot = prompt.turn_id.is_some();
+            Some(EffectiveAgyPrompt {
+                prompt,
+                last_execution_num: prompt_read.last_execution_num(),
+                execution_history_lost: prompt_read.execution_history_lost(),
+                prompt_behind_snapshot,
+            })
+        }
+        (Some(recorded), _) => Some(EffectiveAgyPrompt {
+            prompt: recorded.clone(),
+            last_execution_num: prompt_read.last_execution_num(),
+            execution_history_lost: prompt_read.execution_history_lost(),
+            prompt_behind_snapshot: false,
+        }),
+        (None, Some(pooled)) if !history_lost => Some(EffectiveAgyPrompt {
+            prompt: PromptReference::of_for(Provider::Agy, pooled),
+            last_execution_num: None,
+            execution_history_lost: false,
+            prompt_behind_snapshot: true,
+        }),
+        (None, _) => None,
+    }
+}
+
+struct AgyGuardRecovery {
+    prompt_to_heal: Option<PromptReference>,
+    execution_end: Option<(String, u64)>,
+    pooled_prompt: Option<PromptReference>,
+}
+
+fn pending_agy_guard_recovery(
+    snapshot: &LifecycleSnapshot,
+    prompt_read: &PromptRecordRead,
+) -> Option<AgyGuardRecovery> {
+    let history_lost = snapshot.pools.general.retention_floor_mono_ns.is_some();
+    let effective = effective_agy_prompt(Some(snapshot), history_lost, prompt_read)?;
+    let prompt_to_heal = effective
+        .prompt_behind_snapshot
+        .then(|| effective.prompt.clone());
+    let execution_end = effective.prompt.turn_id.as_deref().and_then(|turn_id| {
+        let max_num = snapshot_max_agy_execution_num(snapshot, turn_id)?;
+        effective
+            .last_execution_num
+            .is_none_or(|prev| max_num > prev)
+            .then(|| (turn_id.to_owned(), max_num))
+    });
+    if prompt_to_heal.is_none() && execution_end.is_none() {
+        return None;
+    }
+    let pooled_prompt = latest(
+        snapshot
+            .lead_observations()
+            .filter(|item| item.is_lead_prompt()),
+    )
+    .map(|item| PromptReference::of_for(Provider::Agy, item));
+    Some(AgyGuardRecovery {
+        prompt_to_heal,
+        execution_end,
+        pooled_prompt,
+    })
+}
+
+fn snapshot_max_agy_execution_num(snapshot: &LifecycleSnapshot, turn_id: &str) -> Option<u64> {
+    snapshot
+        .lead_observations()
+        .filter(|item| ends_agy_invocation(item) && item.turn_id() == Some(turn_id))
+        .filter_map(|item| {
+            if let crate::observations::ObservationBody::ResponseFinished {
+                execution_num, ..
+            } = &item.body
+            {
+                *execution_num
+            } else {
+                None
+            }
+        })
+        .max()
+}
+
+fn agy_stop_ownership(
+    draft: &LifecycleObservation,
+    snapshot: Option<&LifecycleSnapshot>,
+    snapshot_unusable: bool,
+    prompt_read: &PromptRecordRead,
+) -> AgyStopOwnership {
+    if matches!(prompt_read, PromptRecordRead::Unreadable) {
+        return AgyStopOwnership::Unknown;
+    }
+    let usable_snapshot = snapshot.filter(|_| !snapshot_unusable);
+    let history_lost = snapshot_unusable
+        || usable_snapshot
+            .is_some_and(|snapshot| snapshot.pools.general.retention_floor_mono_ns.is_some());
+    let effective = effective_agy_prompt(usable_snapshot, history_lost, prompt_read);
+    let Some(EffectiveAgyPrompt {
+        prompt,
+        last_execution_num,
+        execution_history_lost,
+        ..
+    }) = effective
+    else {
+        if history_lost {
+            let pooled_prompt = usable_snapshot.and_then(|snapshot| {
+                latest(
+                    snapshot
+                        .lead_observations()
+                        .filter(|item| item.is_lead_prompt()),
+                )
+            });
+            return if pooled_prompt.is_some_and(|pooled| {
+                pooled
+                    .turn_id()
+                    .is_some_and(|pid| draft.turn_id().is_some_and(|did| did != pid))
+            }) {
+                AgyStopOwnership::Stale
+            } else {
+                AgyStopOwnership::Unknown
+            };
+        }
+        let conflicting_turn = usable_snapshot.is_some_and(|snapshot| {
+            snapshot.lead_observations().any(|item| {
+                (!item.ends_turn(Provider::Agy) || ends_agy_invocation(item))
+                    && item.turn_id().is_some()
+                    && item.turn_id() != draft.turn_id()
+            })
+        });
+        if conflicting_turn {
+            return if draft.turn_id().is_some() {
+                AgyStopOwnership::Stale
+            } else {
+                AgyStopOwnership::Unknown
+            };
+        }
+        return AgyStopOwnership::Anonymous;
+    };
+    match (prompt.turn_id.as_deref(), draft.turn_id()) {
+        (Some(current_id), Some(draft_id)) if current_id == draft_id => {
+            if let crate::observations::ObservationBody::ResponseFinished {
+                execution_num, ..
+            } = &draft.body
+            {
+                let snapshot_num = usable_snapshot
+                    .and_then(|snapshot| snapshot_max_agy_execution_num(snapshot, current_id));
+                let effective_last = match (last_execution_num, snapshot_num) {
+                    (Some(a), Some(b)) => Some(a.max(b)),
+                    (a, b) => a.or(b),
+                };
+                if execution_history_lost || usable_snapshot.is_none() {
+                    return if effective_last
+                        .is_some_and(|last| execution_num.is_some_and(|c| c <= last))
+                    {
+                        AgyStopOwnership::Stale
+                    } else {
+                        AgyStopOwnership::Unknown
+                    };
+                }
+                match (effective_last, execution_num) {
+                    (Some(last), Some(candidate)) if *candidate <= last => AgyStopOwnership::Stale,
+                    (Some(_), None) => AgyStopOwnership::Unknown,
+                    (None, Some(_)) => {
+                        let has_turn_evidence = usable_snapshot.is_some_and(|snapshot| {
+                            snapshot.lead_observations().any(|item| {
+                                (!item.ends_turn(Provider::Agy) || ends_agy_invocation(item))
+                                    && item.turn_id() == Some(current_id)
+                            })
+                        });
+                        if has_turn_evidence {
+                            AgyStopOwnership::Current
+                        } else {
+                            AgyStopOwnership::Unknown
+                        }
+                    }
+                    (None, None) if history_lost || usable_snapshot.is_none() => {
+                        AgyStopOwnership::Unknown
+                    }
+                    _ => AgyStopOwnership::Current,
+                }
+            } else {
+                AgyStopOwnership::Current
+            }
+        }
+        (Some(_), Some(_)) => AgyStopOwnership::Stale,
+        (Some(_), None) => AgyStopOwnership::Unknown,
+        (None, Some(draft_id)) => {
+            let seen_before_prompt = usable_snapshot.is_some_and(|snapshot| {
+                snapshot.lead_observations().any(|item| {
+                    item.observed_mono_ns.as_str() < prompt.observed_mono_ns.as_str()
+                        && item.turn_id() == Some(draft_id)
+                })
+            });
+            if seen_before_prompt {
+                AgyStopOwnership::Stale
+            } else {
+                AgyStopOwnership::Unknown
+            }
+        }
+        (None, None) => {
+            if snapshot_unusable {
+                return AgyStopOwnership::Unknown;
+            }
+            let Some(snapshot) = usable_snapshot else {
+                return AgyStopOwnership::Unknown;
+            };
+            let prompt_in_pool = snapshot
+                .lead_observations()
+                .any(|item| item.observation_id == prompt.observation_id);
+            let pool_has_identified = snapshot
+                .lead_observations()
+                .any(|item| item.turn_id().is_some());
+            if prompt_in_pool || !pool_has_identified {
+                AgyStopOwnership::Anonymous
+            } else {
+                AgyStopOwnership::Unknown
+            }
+        }
+    }
+}
+
+fn agy_stop_superseded_by_ownership(
+    provider: Provider,
+    draft: &LifecycleObservation,
+    snapshot: Option<&LifecycleSnapshot>,
+    snapshot_unusable: bool,
+    prompt_read: &PromptRecordRead,
+) -> bool {
+    if provider != Provider::Agy || !draft.ends_turn(Provider::Agy) {
+        return false;
+    }
+    matches!(
+        agy_stop_ownership(draft, snapshot, snapshot_unusable, prompt_read),
+        AgyStopOwnership::Stale | AgyStopOwnership::Unknown
+    )
+}
+
+/// For `agy`, a Stop-hook continuation or wakeup (`PreInvocation` or
+/// non-terminal `Stop(fullyIdle: false)`) reopens `thinking` in `activity.json`
+/// without writing a lifecycle observation. Returns that activity's monotonic
+/// order when `activity` is an uncleared `agy` `thinking` record.
+fn agy_thinking_order<'a>(
+    provider: Provider,
+    activity: Option<&'a Value>,
+    clear: Option<&Value>,
+) -> Option<&'a str> {
+    if provider != Provider::Agy {
+        return None;
+    }
+    let record = activity?;
+    if record["type"] != "thinking" || record["source"] != "agy" || !uncleared(record, clear) {
+        return None;
+    }
+    record["observed_mono_ns"].as_str()
+}
+
+fn agy_continued_at(root: &Path, identity: &RecordIdentity, provider: Provider) -> Option<String> {
+    if provider != Provider::Agy {
+        return None;
+    }
+    let activity = read_record_at(root, "activity", identity).ok().flatten();
+    let clear = read_record_at(root, "activity_clear", identity)
+        .ok()
+        .flatten();
+    agy_thinking_order(provider, activity.as_ref(), clear.as_ref()).map(str::to_owned)
+}
+
+/// Record that the user stopped the prompt-followed lead turn `turn` follows
+/// (Claude Code or Antigravity CLI), from `event`, and clear the activity.
+/// Both providers run no hook on Esc (as of Claude Code 2.1.300 and `agy`
+/// 1.5.16); the follower observed the provider's own status store transition
+/// away from working (see [`crate::claude_status`] and [`crate::agy_status`]).
+/// It holds the scope and the host it was handed and checks both again under
+/// the launch and claim locks, as `apply_activity` takes them.
 ///
 /// The turn must still be open: its prompt is the lead's latest prompt, and
 /// the lead's last record after it is not a turn end, its `Stop`, its
 /// `StopFailure` or another follower's interrupt. A `Stop` hook that blocks
-/// lets Claude Code go on with the same turn, whose next records then come
+/// lets the provider go on with the same turn, whose next records then come
 /// after that `Stop`, so the last record decides, as it does for a Codex turn
 /// unless a prompt typed after a hook's end shows the turn went on
 /// ([`record_codex_turn_failure`]).
@@ -3986,12 +5073,12 @@ fn latest_prompt(root: &Path, identity: &RecordIdentity) -> Option<PromptReferen
 /// after the latest of the prompt, the lead's observations and the activity,
 /// not when the follower read the file, so a prompt whose hook began before
 /// this write and is recorded after it still shows.
-pub(crate) fn record_claude_turn_interrupt(
+pub(crate) fn record_prompt_turn_interrupt(
     root: &Path,
     address: &PaneAddress,
     launch_id: &str,
     host: &ClaimOwner,
-    turn: &ClaudeTurn,
+    turn: PromptTurn<'_>,
     event: &ProviderEvent,
     ports: &RuntimePorts<'_>,
 ) -> Result<LifecycleResult> {
@@ -4017,22 +5104,72 @@ pub(crate) fn record_claude_turn_interrupt(
                     LifecycleResult::new(Disposition::Skipped),
                 )))
             };
-            if !latest_prompt_is(root, address, launch_id, &binding_id, turn) {
+            let prompt_read = read_latest_prompt(root, &identity);
+            if !prompt_read.as_reference().is_some_and(|latest| {
+                latest.observation_id == turn.observation_id
+                    && latest.observed_mono_ns == turn.observed_mono_ns
+            }) {
                 return skipped();
             }
-            let prompt_stamp = turn.prompt_observed_mono_ns.as_str();
+            let prompt_stamp = turn.observed_mono_ns;
             let snapshot = followed_snapshot(root, &identity)?;
+            // After lifecycle history loss, a genuine normal Stop for this
+            // execution may be suppressed (`Unknown`); only an explicit
+            // canceled step in the conversation DB proves Esc.
+            if provider == Provider::Agy
+                && !turn.confirmed_canceled
+                && (prompt_read.execution_history_lost() || snapshot.is_none())
+            {
+                return skipped();
+            }
             let lead = || {
                 snapshot
                     .iter()
                     .flat_map(LifecycleSnapshot::lead_observations)
             };
-            if latest(lead().filter(|item| item.observed_mono_ns.as_str() > prompt_stamp))
-                .is_some_and(|last| last.ends_turn(provider))
+            if provider == Provider::Agy
+                && let Some(invocation_stamp) = turn.invocation_observed_mono_ns
+                && lead().any(|item| {
+                    item.observed_mono_ns.as_str() > invocation_stamp && ends_agy_invocation(item)
+                })
             {
                 return skipped();
             }
-            let activity = read_record_at(root, "activity", &identity)?;
+            let mut activity: Option<Option<Value>> = None;
+            if let Some(last) = latest(lead().filter(|item| {
+                item.observed_mono_ns.as_str() > prompt_stamp
+                    && (provider != Provider::Agy
+                        || !item.ends_turn(Provider::Agy)
+                        || ends_agy_invocation(item))
+            })) && last.ends_turn(provider)
+            {
+                let invocation_stamp = turn.invocation_observed_mono_ns.unwrap_or(prompt_stamp);
+                let resumed_thinking = if provider == Provider::Agy
+                    && invocation_stamp > last.observed_mono_ns.as_str()
+                {
+                    let standing = read_record_at(root, "activity", &identity)?;
+                    let clear = if standing.as_ref().is_some_and(|record| {
+                        record["type"] == "thinking" && record["source"] == "agy"
+                    }) {
+                        read_record_at(root, "activity_clear", &identity)?
+                    } else {
+                        None
+                    };
+                    let resumed = agy_thinking_order(provider, standing.as_ref(), clear.as_ref())
+                        .is_some_and(|order| order >= invocation_stamp);
+                    activity = Some(standing);
+                    resumed
+                } else {
+                    false
+                };
+                if !resumed_thinking {
+                    return skipped();
+                }
+            }
+            let activity = match activity {
+                Some(standing) => standing,
+                None => read_record_at(root, "activity", &identity)?,
+            };
             let Some(observation) = just_after(
                 iter::once(prompt_stamp)
                     .chain(lead().map(|item| item.observed_mono_ns.as_str()))
@@ -4146,6 +5283,7 @@ struct HoldScope {
     /// false when one exists but could not be read.
     snapshot_absent: bool,
     prompts: Option<LeadPrompts>,
+    prompts_read: PromptRecordRead,
 }
 
 fn prepare_hold_scope(
@@ -4184,11 +5322,6 @@ fn prepare_hold_scope(
                 return Ok(CommitPlan::reporting(None));
             }
             // A record that cannot be read gives the check none of its history.
-            let read = |kind| {
-                read_record_at(&resolved.root, kind, &resolved.binding(&binding_id))
-                    .ok()
-                    .flatten()
-            };
             let found = read_record_at(
                 &resolved.root,
                 "lifecycle_snapshot",
@@ -4199,7 +5332,30 @@ fn prepare_hold_scope(
                 .ok()
                 .flatten()
                 .and_then(|value| serde_json::from_value(value).ok());
-            let prompts = read("lead_prompts").and_then(|value| serde_json::from_value(value).ok());
+            let (prompts, prompts_read) = match read_record_at(
+                &resolved.root,
+                "lead_prompts",
+                &resolved.binding(&binding_id),
+            ) {
+                Ok(None) => (None, PromptRecordRead::Missing),
+                Ok(Some(value)) => match serde_json::from_value::<LeadPrompts>(value) {
+                    Ok(record) => {
+                        let latest = record.latest.clone();
+                        let last_execution_num = record.last_execution_num;
+                        let execution_history_lost = record.execution_history_lost;
+                        (
+                            Some(record),
+                            PromptRecordRead::Present {
+                                latest,
+                                last_execution_num,
+                                execution_history_lost,
+                            },
+                        )
+                    }
+                    Err(_) => (None, PromptRecordRead::Unreadable),
+                },
+                Err(_) => (None, PromptRecordRead::Unreadable),
+            };
             Ok(CommitPlan::reporting(Some(HoldScope {
                 scope: HookScope {
                     address: resolved.address.clone(),
@@ -4211,6 +5367,7 @@ fn prepare_hold_scope(
                 snapshot,
                 snapshot_absent,
                 prompts,
+                prompts_read,
             })))
         },
         |_| Ok(()),
@@ -4241,6 +5398,7 @@ fn obtain_hold_notes(
         snapshot,
         snapshot_absent,
         prompts,
+        prompts_read,
     })) = prepare_hold_scope(resolved, event)
     else {
         return hold_check::bypass(request.registrations, Bypass::NoCurrentScope);
@@ -4263,7 +5421,7 @@ fn obtain_hold_notes(
     // thinking a lifecycle file not yet written is no history, not history
     // that could not be read.
     let prospective = event.observation.as_ref().and_then(|draft| {
-        let recorded_prompt = prompts.as_ref().and_then(|prompts| prompts.latest.as_ref());
+        let recorded_prompt = prompts_read.as_reference();
         if snapshot.is_none() && !(before_thinking && snapshot_absent) {
             return None;
         }
@@ -4271,7 +5429,28 @@ fn obtain_hold_notes(
         // start has none to keep: a Codex prompt typed while its turn runs
         // shares the turn id of the prompt that started it.
         let superseded = snapshot.as_ref().is_some_and(|snapshot| {
-            (!before_thinking && snapshot.repeats_turn_end(draft, observation, recorded_prompt))
+            let continued_at = (!before_thinking)
+                .then(|| {
+                    agy_continued_at(
+                        &resolved.root,
+                        &resolved.binding(binding_id),
+                        snapshot.provider,
+                    )
+                })
+                .flatten();
+            (!before_thinking
+                && (snapshot.repeats_turn_end(
+                    draft,
+                    observation,
+                    recorded_prompt,
+                    continued_at.as_deref(),
+                ) || agy_stop_superseded_by_ownership(
+                    snapshot.provider,
+                    draft,
+                    Some(snapshot),
+                    false,
+                    &prompts_read,
+                )))
                 || snapshot
                     .pools
                     .general
@@ -4344,8 +5523,7 @@ fn obtain_hold_notes(
             deadline_mono_ns: deadline,
             reply: (!before_thinking).then_some(request.reply),
             background_tasks: (!before_thinking).then_some(request.background_tasks.unwrap_or(&[])),
-            prompt: (before_thinking && event.source_event == "UserPromptSubmit")
-                .then_some(request.prompt),
+            prompt: (before_thinking && event.is_lead_prompt).then_some(request.prompt),
             lifecycle: quiet.then_some(lifecycle.as_ref()).flatten(),
             prospective_observation: quiet.then_some(prospective.as_ref()).flatten(),
         };
@@ -4381,7 +5559,7 @@ fn tool_call_skips_check(resolved: &ResolvedLaunch, event: &ProviderEvent, now: 
         return false;
     };
     let thinking = existing["type"] == "thinking";
-    (thinking || notify_held_by_child(resolved, &binding_id, &existing))
+    (thinking || notify_held_by_child(resolved, &binding_id, &existing, None))
         && read_record_at(&resolved.root, "activity_clear", &identity).is_ok_and(|clear| {
             activity_visible(
                 &resolved.root,
@@ -4413,11 +5591,20 @@ fn tool_called_since_prompt(root: &Path, identity: &RecordIdentity) -> bool {
 }
 
 /// Whether `activity` is a `notify` that a child's permission prompt, still
-/// waiting, holds against the lead's tool calls.
-fn notify_held_by_child(resolved: &ResolvedLaunch, binding_id: &str, activity: &Value) -> bool {
+/// waiting after `transition` (if any), holds against the lead's tool calls.
+fn notify_held_by_child(
+    resolved: &ResolvedLaunch,
+    binding_id: &str,
+    activity: &Value,
+    transition: Option<ChildTransition<'_>>,
+) -> bool {
     activity["type"] == "notify"
         && child_waits(resolved, binding_id, |set, end| {
-            set.waits_since(end, activity["observed_mono_ns"].as_str().unwrap_or(""))
+            set.waits_since_after(
+                end,
+                activity["observed_mono_ns"].as_str().unwrap_or(""),
+                transition,
+            )
         })
 }
 
@@ -4431,26 +5618,25 @@ fn hold_applies(event: &ProviderEvent, request: &hold_check::Request<'_>) -> boo
 }
 
 /// When the registered checks run for `event`, if they do: before a lead
-/// Claude or Codex `Stop`, and, for quiet checks, before a lead prompt or tool
+/// Claude, Codex, or Antigravity CLI `Stop` that ends normally
+/// (`ResponseFinished`), and, for quiet checks, before a lead prompt or tool
 /// call writes `thinking`. `obtain_hold_notes` then skips the tool calls after
 /// a turn's first (`tool_call_skips_check`).
 fn check_phase(event: &ProviderEvent, request: &hold_check::Request<'_>) -> Option<Phase> {
-    if event.agent_id.is_some()
-        || !matches!(event.provider, Some(Provider::Claude | Provider::Codex))
-    {
+    if event.agent_id.is_some() || !event.provider.is_some_and(Provider::supports_quiet_notes) {
         return None;
     }
     let quiet = hold_check::has_quiet(request.registrations);
-    if event.source_event == "Stop" && (quiet || hold_applies(event, request)) {
+    if event.source_event == "Stop"
+        && event.activity_type.as_deref() == Some("stop")
+        && (quiet || hold_applies(event, request))
+    {
         return Some(Phase::BeforeTurnEnd);
     }
     (quiet
         && event.activity_type.as_deref() == Some("thinking")
-        && matches!(
-            event.source_event.as_str(),
-            "UserPromptSubmit" | "PreToolUse"
-        ))
-    .then_some(Phase::BeforeThinking)
+        && (event.is_lead_prompt || event.source_event == "PreToolUse"))
+        .then_some(Phase::BeforeThinking)
 }
 
 #[cfg(test)]
@@ -4477,8 +5663,11 @@ mod lifecycle_write_tests {
             admission: None,
             planned_native: Some(true),
             native_refused: false,
+            activity_refused: false,
             pending_observation_id: Some("11111111-1111-4111-8111-111111111111".into()),
             observation_id: None,
+            pending_observation_kind: Some("response_finished".into()),
+            observation_kind: None,
             pending_turn_end: Some(TurnEnd {
                 status: TurnEndStatus::Recorded,
                 held: Some(true),
@@ -4497,6 +5686,8 @@ mod lifecycle_write_tests {
                 }],
             }),
             turn_end: None,
+            pending_reply_transcript_attributable: false,
+            reply_transcript_attributable: false,
             hold_checks: Vec::new(),
             quiet_snapshot: None,
             persistence: HookPersistence {
@@ -4547,6 +5738,7 @@ mod lifecycle_write_tests {
             lifecycle_replacement: Some(PreparedRecordWrite::new(path.clone(), &snapshot).unwrap()),
             prompts_replacement: None,
             prompt_record_alone: false,
+            prompts_before_lifecycle: false,
         };
         let error = crate::records::with_lock(
             &launch_lock(&root, &address, &launch_id),
@@ -4610,6 +5802,164 @@ mod lifecycle_write_tests {
         assert_eq!(evidence.persistence.lifecycle, Persistence::Confirmed);
         assert!(evidence.observation_id.is_some());
         drop(evidence);
+
+        // On a fresh Stop (`prompts_before_lifecycle = false`), lifecycle.json
+        // is written first so a failed write #1 leaves prompts.json without
+        // last_execution_num and retrying Stop(1) still classifies as Current.
+        // Once Stop(1) is recorded in lifecycle.json and write #2 fails, a
+        // later healing write (`prompts_before_lifecycle = true`) writes
+        // prompts.json BEFORE lifecycle.json can evict Stop(1): failing write
+        // #1 refuses to overwrite lifecycle.json, and once prompts.json lands,
+        // Stop(1) is Stale even after eviction while Stop(2) is Current.
+        std::fs::remove_file(&path).unwrap();
+        let mut initial_prompts = samples["lead_prompts"].clone();
+        initial_prompts["latest"]["turn_id"] = json!("exec-1");
+        crate::records::atomic_replace(&prompts_path, &initial_prompts).unwrap();
+        let mut agy_prompts = initial_prompts.clone();
+        agy_prompts["last_execution_num"] = json!(1);
+        let stop_draft = |num: u64| LifecycleObservation {
+            observation_id: Uuid::new_v4().to_string(),
+            observed_mono_ns: "00000000000000000000".into(),
+            written_at_unix_ns: "00000000000000000000".into(),
+            source_event: "Stop".into(),
+            source_version: None,
+            actor: crate::observations::Actor::Lead,
+            correlation: Some(crate::observations::NativeCorrelation {
+                turn_id: Some("exec-1".into()),
+                ..Default::default()
+            }),
+            turn_end: None,
+            body: crate::observations::ObservationBody::ResponseFinished {
+                stop_hook_active: Some(true),
+                execution_num: Some(num),
+            },
+        };
+        let fresh_stop_mutation = Mutation {
+            prompts_replacement: Some(
+                PreparedRecordWrite::new(prompts_path.clone(), &agy_prompts).unwrap(),
+            ),
+            prompts_before_lifecycle: false,
+            ..mutation.clone()
+        };
+        let err_fresh = crate::records::with_lock(
+            &launch_lock(&root, &address, &launch_id),
+            LOCK_TIMEOUT,
+            || {
+                apply_observed_outputs_with(&resolved, binding_id, &fresh_stop_mutation, |_| {
+                    Err(AttentionError::new(
+                        DiagnosticCode::StatePermissions,
+                        "synthetic fresh stop lifecycle failure",
+                    ))
+                })
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            err_fresh.diagnostic.context["lifecycle_write"],
+            "unconfirmed"
+        );
+        assert!(!path.exists());
+        let untouched_prompts = read_latest_prompt(&root, &binding);
+        assert_eq!(untouched_prompts.last_execution_num(), None);
+        // With the prior turn's snapshot intact (carrying exec-1's prompt),
+        // retrying Stop(1) still classifies as Current; when both lifecycle.json
+        // and last_execution_num are absent (rebuild after lost ordinal), Stop(1)
+        // classifies as Unknown so an old replay cannot close a continuation.
+        let mut intact_snapshot: LifecycleSnapshot = serde_json::from_value(snapshot).unwrap();
+        intact_snapshot.provider = Provider::Agy;
+        intact_snapshot.pools.general.observations = vec![LifecycleObservation {
+            observation_id: initial_prompts["latest"]["observation_id"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+            observed_mono_ns: initial_prompts["latest"]["observed_mono_ns"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+            written_at_unix_ns: initial_prompts["latest"]["written_at_unix_ns"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+            source_event: "PreInvocation".into(),
+            source_version: None,
+            actor: crate::observations::Actor::Lead,
+            correlation: Some(crate::observations::NativeCorrelation {
+                turn_id: Some("exec-1".into()),
+                ..Default::default()
+            }),
+            turn_end: None,
+            body: crate::observations::ObservationBody::PromptSubmitted { input_source: None },
+        }];
+        assert_eq!(
+            agy_stop_ownership(
+                &stop_draft(1),
+                Some(&intact_snapshot),
+                false,
+                &untouched_prompts
+            ),
+            AgyStopOwnership::Current
+        );
+        assert_eq!(
+            agy_stop_ownership(&stop_draft(1), None, false, &untouched_prompts),
+            AgyStopOwnership::Unknown
+        );
+
+        let heal_mutation = Mutation {
+            prompts_replacement: Some(
+                PreparedRecordWrite::new(prompts_path.clone(), &agy_prompts).unwrap(),
+            ),
+            prompts_before_lifecycle: true,
+            ..mutation
+        };
+        let err1 = crate::records::with_lock(
+            &launch_lock(&root, &address, &launch_id),
+            LOCK_TIMEOUT,
+            || {
+                apply_observed_outputs_with(&resolved, binding_id, &heal_mutation, |_| {
+                    Err(AttentionError::new(
+                        DiagnosticCode::StatePermissions,
+                        "synthetic guard heal failure",
+                    ))
+                })
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err1.diagnostic.context["prompts_write"], "unconfirmed");
+        assert!(!path.exists());
+        let err2 = crate::records::with_lock(
+            &launch_lock(&root, &address, &launch_id),
+            LOCK_TIMEOUT,
+            || {
+                let mut writes = 0;
+                apply_observed_outputs_with(&resolved, binding_id, &heal_mutation, |write| {
+                    writes += 1;
+                    if writes == 2 {
+                        return Err(AttentionError::new(
+                            DiagnosticCode::StatePermissions,
+                            "synthetic lifecycle write failure",
+                        ));
+                    }
+                    write.apply()
+                })
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err2.diagnostic.context["lifecycle_write"], "unconfirmed");
+        assert!(!path.exists());
+        let saved_guard = read_latest_prompt(&root, &binding);
+        assert_eq!(saved_guard.last_execution_num(), Some(1));
+        assert_eq!(
+            agy_stop_ownership(&stop_draft(1), None, false, &saved_guard),
+            AgyStopOwnership::Stale
+        );
+        assert_eq!(
+            agy_stop_ownership(&stop_draft(2), None, false, &saved_guard),
+            AgyStopOwnership::Unknown
+        );
+        assert_eq!(
+            agy_stop_ownership(&stop_draft(2), Some(&intact_snapshot), false, &saved_guard),
+            AgyStopOwnership::Current
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -616,6 +616,8 @@ return function(context)
     return kind == "lifecycle_snapshot" or kind == "child_lifecycle_snapshot"
   end
 
+  local quiet_providers = { claude = true, codex = true, agy = true }
+
   local function validate_lifecycle(value)
     local limits, keys, ids = protocol.limits, {}, {}
     for name, pool in pairs(value.pools) do
@@ -632,8 +634,9 @@ return function(context)
             or compact_size(item) - compact_size(native) > limits.lifecycle_envelope_max_bytes then return false end
           for _, check in ipairs(item.turn_end.hold_checks) do
             if check.note and (item.source_event ~= "Stop"
+              or item.kind ~= "response_finished"
               or (check.note.hold and value.provider ~= "claude")
-              or (check.note.quiet and value.provider ~= "claude" and value.provider ~= "codex")) then return false end
+              or (check.note.quiet and not quiet_providers[value.provider])) then return false end
           end
         end
         local allowed_sources = protocol.lifecycle_sources[value.provider] and protocol.lifecycle_sources[value.provider][item.kind]
@@ -767,7 +770,7 @@ return function(context)
         return nil, invalid("hold notes require a binding stop or thinking")
       end
       for _, note in pairs(parsed.hold_notes) do
-        local supported = (note.quiet and (parsed.source == "claude" or parsed.source == "codex"))
+        local supported = (note.quiet and quiet_providers[parsed.source])
           or (parsed.source == "claude" and parsed.type == "stop")
         if not supported then
           return nil, invalid("hold note is not supported for this activity or provider")

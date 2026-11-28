@@ -89,6 +89,8 @@ pub enum ObservationBody {
     ResponseFinished {
         #[serde(skip_serializing_if = "Option::is_none")]
         stop_hook_active: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        execution_num: Option<u64>,
     },
     RunSettled,
     AttemptOutcome {
@@ -216,6 +218,17 @@ pub struct LeadPrompts {
     /// The lead's latest prompt, whether or not the lifecycle file stored it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest: Option<PromptReference>,
+    /// Highest accepted Agy `ResponseFinished` `execution_num` for `latest`'s
+    /// `turn_id`, kept beside `latest` so an evicted or rebuilt replay cannot
+    /// close a newer continuation under the same execution id. Omitted for
+    /// other providers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_execution_num: Option<u64>,
+    /// Set for an Agy execution when `lifecycle.json` was missing or moved
+    /// aside after `latest` was recorded, so a rebuilt tool observation cannot
+    /// re-admit an older Stop whose ordinal write had failed before the loss.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub execution_history_lost: bool,
     pub answers: Vec<PromptAnswer>,
 }
 
@@ -233,6 +246,10 @@ pub struct PromptReference {
     pub observation_id: String,
     pub observed_mono_ns: String,
     pub written_at_unix_ns: String,
+    /// Native `turn_id` (`executionId`) for Agy lead prompts; omitted for other
+    /// providers so existing `prompts.json` records stay unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
 }
 
 /// A prompt that answered one question of a call: the call's native id, the
@@ -252,11 +269,17 @@ pub struct PromptAnswer {
 impl PromptReference {
     /// The later of the prompt record's latest and the newest the pools
     /// hold, in observation order; the record's wins a tie, as it is the
-    /// one generic traffic cannot evict.
+    /// one generic traffic cannot evict (filling a missing `turn_id` from
+    /// the pooled prompt when both name the same observation).
     pub fn later_of(recorded: Option<Self>, pooled: Option<Self>) -> Option<Self> {
         match (recorded, pooled) {
-            (Some(recorded), Some(pooled)) => {
+            (Some(mut recorded), Some(pooled)) => {
                 if recorded.order() >= pooled.order() {
+                    if recorded.observation_id == pooled.observation_id
+                        && recorded.turn_id.is_none()
+                    {
+                        recorded.turn_id = pooled.turn_id;
+                    }
                     Some(recorded)
                 } else {
                     Some(pooled)
@@ -271,7 +294,16 @@ impl PromptReference {
             observation_id: prompt.observation_id.clone(),
             observed_mono_ns: prompt.observed_mono_ns.clone(),
             written_at_unix_ns: prompt.written_at_unix_ns.clone(),
+            turn_id: None,
         }
+    }
+
+    pub fn of_for(provider: Provider, prompt: &LifecycleObservation) -> Self {
+        let mut reference = Self::of(prompt);
+        if provider == Provider::Agy {
+            reference.turn_id = prompt.turn_id().map(str::to_owned);
+        }
+        reference
     }
     /// Observation order: the monotonic stamp, then the id, as pools sort.
     fn order(&self) -> (&str, &str) {
@@ -289,6 +321,8 @@ impl LeadPrompts {
             launch_id: launch_id.to_owned(),
             binding_id: binding_id.to_owned(),
             latest: None,
+            last_execution_num: None,
+            execution_history_lost: false,
             answers: vec![],
         }
     }
@@ -303,8 +337,56 @@ impl LeadPrompts {
             .is_none_or(|latest| latest.order() < prompt.order());
         if later {
             self.latest = Some(prompt.clone());
+            self.last_execution_num = None;
+            self.execution_history_lost = false;
         }
         later
+    }
+
+    /// Marks that `lifecycle.json` was lost or rebuilt during `latest`'s
+    /// execution so subsequent rebuilt tool events cannot re-admit a replayed
+    /// Stop whose ordinal was not yet persisted here.
+    pub fn mark_execution_history_lost(&mut self) -> bool {
+        if self.latest.is_none() || self.execution_history_lost {
+            return false;
+        }
+        self.execution_history_lost = true;
+        true
+    }
+
+    /// Records the highest accepted Agy `ResponseFinished` `execution_num` for
+    /// `latest`'s `turn_id`, backfilling `latest.turn_id` from `pooled_prompt`
+    /// when both name the same observation.
+    pub fn record_agy_execution_end(
+        &mut self,
+        turn_id: &str,
+        execution_num: u64,
+        pooled_prompt: Option<&PromptReference>,
+    ) -> bool {
+        if let Some(latest) = &mut self.latest
+            && latest.turn_id.is_none()
+            && let Some(pooled) = pooled_prompt
+            && pooled.observation_id == latest.observation_id
+            && pooled.observed_mono_ns == latest.observed_mono_ns
+        {
+            latest.turn_id = pooled.turn_id.clone();
+        }
+        if self
+            .latest
+            .as_ref()
+            .and_then(|latest| latest.turn_id.as_deref())
+            != Some(turn_id)
+        {
+            return false;
+        }
+        if self
+            .last_execution_num
+            .is_some_and(|prev| execution_num <= prev)
+        {
+            return false;
+        }
+        self.last_execution_num = Some(execution_num);
+        true
     }
 
     /// Adds the questions `prompt` answered. A question already answered
@@ -510,7 +592,12 @@ impl LifecycleView {
             .observations
             .iter()
             .rfind(|pooled| pooled.observation.is_lead_prompt())
-            .map(|pooled| PromptReference::of(&pooled.observation));
+            .map(|pooled| {
+                lead.map_or_else(
+                    || PromptReference::of(&pooled.observation),
+                    |snapshot| PromptReference::of_for(snapshot.provider, &pooled.observation),
+                )
+            });
         view
     }
 
@@ -1018,11 +1105,15 @@ impl LifecycleSnapshot {
 
     /// Whether `draft`, a lead turn end observed at `at`, is an end delivered
     /// again, of a turn the pools hold an end of (see [`Self::repeats`]).
+    /// `continued_at`, when present, is the monotonic order of a newer
+    /// uncleared activity proving the same turn resumed without emitting a
+    /// lifecycle observation (such as an `agy` continuation `PreInvocation`).
     pub fn repeats_turn_end(
         &self,
         draft: &LifecycleObservation,
         at: &str,
         recorded_prompt: Option<&PromptReference>,
+        continued_at: Option<&str>,
     ) -> bool {
         let key = draft.storage_key_parts();
         self.pools
@@ -1030,7 +1121,7 @@ impl LifecycleSnapshot {
             .observations
             .iter()
             .find(|item| item.storage_key_parts() == key)
-            .is_some_and(|stored| self.repeats(stored, draft, at, recorded_prompt))
+            .is_some_and(|stored| self.repeats(stored, draft, at, recorded_prompt, continued_at))
     }
 
     /// Whether `candidate`, observed at `at`, is `stored`, which has its key,
@@ -1042,13 +1133,17 @@ impl LifecycleSnapshot {
     /// equals `stored`. The pools keep one prompt per turn id, so a prompt
     /// typed while the turn runs is recorded only as the prompt record's
     /// latest, `recorded_prompt`, and counts as the lead going on; a prompt
-    /// carrying another turn's id is pooled, under that id.
+    /// carrying another turn's id is pooled, under that id. `continued_at`
+    /// carries the monotonic order of an uncleared same-turn continuation
+    /// activity when the provider reopens `thinking` without a lifecycle
+    /// observation.
     fn repeats(
         &self,
         stored: &LifecycleObservation,
         candidate: &LifecycleObservation,
         at: &str,
         recorded_prompt: Option<&PromptReference>,
+        continued_at: Option<&str>,
     ) -> bool {
         if stored.turn_id().is_some() && stored.ends_turn(self.provider) {
             let after = || {
@@ -1059,14 +1154,78 @@ impl LifecycleSnapshot {
                 item.is_lead_prompt()
                     && item.turn_id() != stored.turn_id()
                     && item.observed_mono_ns.as_str() < at
-            }) {
+            }) || (self.provider == Provider::Agy
+                && recorded_prompt.is_some_and(|prompt| {
+                    prompt.turn_id.is_some()
+                        && prompt.turn_id.as_deref() != stored.turn_id()
+                        && prompt.observed_mono_ns.as_str() > stored.observed_mono_ns.as_str()
+                        && prompt.observed_mono_ns.as_str() < at
+                }))
+            {
                 return true;
             }
+            if let (
+                ObservationBody::ResponseFinished {
+                    execution_num: Some(stored_num),
+                    ..
+                },
+                ObservationBody::ResponseFinished {
+                    execution_num: Some(candidate_num),
+                    ..
+                },
+            ) = (&stored.body, &candidate.body)
+                && candidate_num <= stored_num
+            {
+                return true;
+            }
+            let continuation_resumed = if self.provider == Provider::Agy {
+                matches!(
+                    (&stored.body, &candidate.body),
+                    (
+                        ObservationBody::ResponseFinished {
+                            execution_num: Some(stored_num),
+                            ..
+                        },
+                        ObservationBody::ResponseFinished {
+                            execution_num: Some(candidate_num),
+                            ..
+                        }
+                    ) if candidate_num > stored_num
+                )
+            } else {
+                false
+            };
+            let ignore_delayed_tool_result =
+                self.provider == Provider::Agy && !continuation_resumed;
             if after()
+                .filter(|item| {
+                    if self.provider != Provider::Agy {
+                        return true;
+                    }
+                    let not_superseded_end = !item.ends_turn(Provider::Agy)
+                        || item
+                            .turn_end
+                            .as_ref()
+                            .is_none_or(|end| end.status != TurnEndStatus::Superseded);
+                    let same_execution = item.turn_id() == stored.turn_id();
+                    let not_delayed_result = !ignore_delayed_tool_result
+                        || !matches!(item.body, ObservationBody::ToolResult { .. });
+                    not_superseded_end && same_execution && not_delayed_result
+                })
                 .map(|item| item.observed_mono_ns.as_str())
                 .chain(
                     recorded_prompt
+                        .filter(|prompt| {
+                            self.provider != Provider::Agy
+                                || prompt.turn_id.as_deref() == stored.turn_id()
+                        })
                         .map(|prompt| prompt.observed_mono_ns.as_str())
+                        .filter(|order| *order > stored.observed_mono_ns.as_str()),
+                )
+                .chain(
+                    continuation_resumed
+                        .then_some(continued_at)
+                        .flatten()
                         .filter(|order| *order > stored.observed_mono_ns.as_str()),
                 )
                 .any(|order| order < at)
@@ -1107,8 +1266,9 @@ impl LifecycleSnapshot {
                             .hold_checks
                             .iter()
                             .any(|check| check.note.as_ref().is_some_and(|note| !note.holds()))
-                            && (!matches!(self.provider, Provider::Claude | Provider::Codex)
-                                || item.source_event != "Stop")))
+                            && (!self.provider.supports_quiet_notes()
+                                || item.source_event != "Stop"
+                                || !matches!(item.body, ObservationBody::ResponseFinished { .. }))))
                 {
                     return Err(invalid());
                 }
@@ -1211,6 +1371,18 @@ impl LifecycleSnapshot {
         candidate: LifecycleObservation,
         recorded_prompt: Option<&PromptReference>,
     ) -> Result<bool> {
+        self.reduce_with_continuation(candidate, recorded_prompt, None)
+    }
+
+    /// Like [`Self::reduce`], additionally accepting `continued_at` when a
+    /// same-turn continuation reopened `thinking` without a lifecycle
+    /// observation.
+    pub fn reduce_with_continuation(
+        &mut self,
+        candidate: LifecycleObservation,
+        recorded_prompt: Option<&PromptReference>,
+        continued_at: Option<&str>,
+    ) -> Result<bool> {
         self.validate_semantics()?;
         let limits = &manifest()?.limits;
         if !candidate.within_bounds()? {
@@ -1247,6 +1419,7 @@ impl LifecycleSnapshot {
                     &candidate,
                     &candidate.observed_mono_ns,
                     recorded_prompt,
+                    continued_at,
                 )
             {
                 return Ok(false);

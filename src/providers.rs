@@ -148,6 +148,29 @@ pub struct ProviderEvent {
     /// stops. `None` when the event carries no list, or one that cannot be
     /// read in full.
     pub in_flight_task_ids: Option<Vec<String>>,
+    /// Child ids explicitly stopped by a tool call (such as an `agy`
+    /// `manage_subagents` `kill`).
+    pub stopped_child_ids: Vec<String>,
+    /// Starting step count reported on an `agy` lead `PreInvocation`, used by
+    /// the turn follower to distinguish cancellations in the current turn from
+    /// earlier turns.
+    pub initial_step_count: Option<i64>,
+    /// Whether this event is a lead user prompt (`UserPromptSubmit` for
+    /// Claude/Codex, or a confirmed lead `PreInvocation(invocationNum: 0)` for
+    /// Agy), independent of whether optional observation correlation fields
+    /// parsed cleanly.
+    pub is_lead_prompt: bool,
+    /// Whether this event is a confirmed intra-turn thinking continuation or
+    /// non-prompt wakeup (Agy `PreInvocation(invocationNum > 0)`, Agy
+    /// `PreInvocation(invocationNum: 0)` whose transcript confirms a non-prompt
+    /// wakeup, Agy lead `PostToolUse` for `manage_subagents` `kill`/`kill_all`,
+    /// or Agy `Stop(fullyIdle: false)`).
+    pub continues_turn: bool,
+    /// Whether this event may reuse-or-claim a self-owned pane claim and create
+    /// or replace the binding lazily without a preceding `SessionStart` (Agy
+    /// lead `PreInvocation` carrying a valid `transcriptPath`, since as of
+    /// `agy` 1.5.16 `agy --resume` skips `SessionStart`).
+    pub lazy_binding: bool,
     /// The questions a Codex lead prompt answers. Only their ids are taken
     /// from the prompt; its text is never kept.
     pub answered_questions: Vec<crate::observations::AnsweredQuestion>,
@@ -222,21 +245,21 @@ impl ProviderEvent {
         }
     }
 
-    /// The end of a Claude Code lead turn the user stopped with Esc, which
-    /// as of Claude Code 2.1.300 runs no hook: the session's status file went
-    /// from a working turn to none. Nothing is left to report, so the
-    /// activity is cleared, as a Codex `Interrupt` clears it. `version` is
-    /// the Claude Code version the file names.
-    pub fn claude_turn_interrupt(session_id: &str, version: Option<String>) -> Self {
+    fn turn_interrupt(
+        provider: Provider,
+        source_event: &str,
+        session_id: &str,
+        version: Option<String>,
+    ) -> Self {
         Self {
-            source_event: crate::claude_status::SESSION_STATUS.to_owned(),
+            source_event: source_event.to_owned(),
             action: ProviderAction::Clear,
-            provider: Some(Provider::Claude),
+            provider: Some(provider),
             provider_session_id: Some(session_id.to_owned()),
             observation: Some(LifecycleObservation {
                 turn_end: None,
                 observation_id: uuid::Uuid::new_v4().to_string(),
-                source_event: crate::claude_status::SESSION_STATUS.to_owned(),
+                source_event: source_event.to_owned(),
                 source_version: version,
                 observed_mono_ns: "00000000000000000000".to_owned(),
                 written_at_unix_ns: "00000000000000000000".to_owned(),
@@ -246,6 +269,34 @@ impl ProviderEvent {
             }),
             ..Self::default()
         }
+    }
+
+    /// The end of a Claude Code lead turn the user stopped with Esc, which
+    /// as of Claude Code 2.1.300 runs no hook: the session's status file went
+    /// from a working turn to none. Nothing is left to report, so the
+    /// activity is cleared, as a Codex `Interrupt` clears it. `version` is
+    /// the Claude Code version the file names.
+    pub fn claude_turn_interrupt(session_id: &str, version: Option<String>) -> Self {
+        Self::turn_interrupt(
+            Provider::Claude,
+            crate::claude_status::SESSION_STATUS,
+            session_id,
+            version,
+        )
+    }
+
+    /// The end of an `agy` lead turn the user stopped with Esc, which as of
+    /// `agy` 1.5.16 runs no `Stop` hook: the conversation's local status
+    /// databases went from working to idle or recorded a canceled step for the
+    /// current turn. Clears the activity, as a Codex `Interrupt` or Claude
+    /// status interrupt clears it.
+    pub fn agy_turn_interrupt(session_id: &str) -> Self {
+        Self::turn_interrupt(
+            Provider::Agy,
+            crate::agy_status::AGY_STATUS,
+            session_id,
+            None,
+        )
     }
 }
 
@@ -386,6 +437,7 @@ fn parse_provider_common(
         Provider::Claude => "CLAUDE_CONFIG_DIR",
         Provider::Codex => "CODEX_HOME",
         Provider::Pi => "PI_CODING_AGENT_DIR",
+        Provider::Agy => unreachable!("agy uses parse_agy"),
     };
     let mut dropped = DroppedFields::default();
     // Claude Code 2.1.283 sends an empty `agent_type` for the agents it runs
@@ -504,6 +556,7 @@ fn parse_claude_or_codex(
     if event_name == "UserPromptSubmit" && event.agent_id.is_none() {
         event.action = ProviderAction::Activity;
         event.activity_type = Some("thinking".to_owned());
+        event.is_lead_prompt = true;
         return event;
     }
     // Claude sends StopFailure in place of Stop when an API error ends the
@@ -810,6 +863,489 @@ fn parse_pi(event_name: &str, payload: &Value, env: &BTreeMap<String, String>) -
     event
 }
 
+fn nonempty_optional_label(
+    value: Option<&Value>,
+    field: &str,
+) -> std::result::Result<Option<String>, Diagnostic> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) if text.is_empty() => Ok(None),
+        Some(value) => safe_label(value, field).map(Some),
+    }
+}
+
+fn optional_bool(
+    payload: &Value,
+    field: &str,
+    message: &str,
+) -> std::result::Result<Option<bool>, Diagnostic> {
+    match payload.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(flag)) => Ok(Some(*flag)),
+        Some(_) => Err(Diagnostic::new(DiagnosticCode::RecordInvalid, message)),
+    }
+}
+
+fn draft_observation(
+    event_name: &str,
+    observation_id: String,
+    agent_id: Option<&str>,
+    correlation: NativeCorrelation,
+    body: ObservationBody,
+) -> LifecycleObservation {
+    LifecycleObservation {
+        turn_end: None,
+        observation_id,
+        source_event: event_name.to_owned(),
+        source_version: None,
+        observed_mono_ns: "00000000000000000000".to_owned(),
+        written_at_unix_ns: "00000000000000000000".to_owned(),
+        actor: match agent_id {
+            Some(id) => Actor::Child {
+                agent_id: id.to_owned(),
+                agent_key: crate::protocol::sha256_hex(id.as_bytes()),
+            },
+            None => Actor::Lead,
+        },
+        correlation: (correlation != NativeCorrelation::default()).then_some(correlation),
+        body,
+    }
+}
+
+fn agy_observation(
+    event_name: &str,
+    agent_id: Option<&str>,
+    tool_call_id: Option<String>,
+    turn_id: Option<String>,
+    body: ObservationBody,
+) -> LifecycleObservation {
+    draft_observation(
+        event_name,
+        uuid::Uuid::new_v4().to_string(),
+        agent_id,
+        NativeCorrelation {
+            tool_call_id,
+            turn_id,
+            ..NativeCorrelation::default()
+        },
+        body,
+    )
+}
+
+struct AgyToolCall<'a> {
+    object: &'a serde_json::Map<String, Value>,
+    name: String,
+    id: std::result::Result<Option<String>, Diagnostic>,
+}
+
+fn agy_tool_call<'a>(
+    payload: &'a Value,
+    event_name: &str,
+) -> std::result::Result<AgyToolCall<'a>, Diagnostic> {
+    let Some(tool_call) = payload.get("toolCall").and_then(Value::as_object) else {
+        return Err(Diagnostic::new(
+            DiagnosticCode::RecordInvalid,
+            format!("{event_name} requires toolCall"),
+        ));
+    };
+    let tool_name = match tool_call.get("name") {
+        Some(value) => safe_label(value, "toolCall.name")?,
+        None => {
+            return Err(Diagnostic::new(
+                DiagnosticCode::RecordInvalid,
+                format!("{event_name} requires toolCall.name"),
+            ));
+        }
+    };
+    let tool_call_id = nonempty_optional_label(tool_call.get("id"), "id");
+    Ok(AgyToolCall {
+        object: tool_call,
+        name: tool_name,
+        id: tool_call_id,
+    })
+}
+
+fn agy_post_tool_error(payload: &Value) -> std::result::Result<Option<bool>, Diagnostic> {
+    match payload.get("error") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) if text.is_empty() => Ok(None),
+        Some(Value::String(_)) => Ok(Some(true)),
+        Some(_) => Err(Diagnostic::new(
+            DiagnosticCode::RecordInvalid,
+            "PostToolUse error field is invalid",
+        )),
+    }
+}
+
+fn agy_manage_subagents_stops(
+    tool_call: &serde_json::Map<String, Value>,
+    is_lead: bool,
+) -> (Option<Vec<String>>, Vec<String>) {
+    let Some(args) = tool_call.get("args").and_then(Value::as_object) else {
+        return (None, Vec::new());
+    };
+    match args.get("Action").and_then(Value::as_str) {
+        Some("kill_all") if is_lead => (Some(Vec::new()), Vec::new()),
+        Some("kill") => {
+            let ids = args
+                .get("ConversationIds")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| safe_label(item, "ConversationIds").ok())
+                        .collect()
+                })
+                .unwrap_or_default();
+            (None, ids)
+        }
+        _ => (None, Vec::new()),
+    }
+}
+
+fn agy_ignored(diagnostic: Diagnostic) -> ProviderEvent {
+    ProviderEvent {
+        diagnostic: Some(diagnostic),
+        ..ProviderEvent::inert(Some(Provider::Agy))
+    }
+}
+
+fn parse_agy(event_name: &str, payload: &Value) -> ProviderEvent {
+    if !declared_hook(Provider::Agy, event_name) {
+        return ProviderEvent::ignored(
+            Some(Provider::Agy),
+            DiagnosticCode::IntegrationVersionMismatch,
+            "provider event is not supported",
+        );
+    }
+    if payload.get("hookEventName").and_then(Value::as_str) != Some(event_name) {
+        return ProviderEvent::ignored(
+            Some(Provider::Agy),
+            DiagnosticCode::RecordInvalid,
+            "hook event name does not match the callback",
+        );
+    }
+    let conversation_id = match safe_label(&payload["conversationId"], "conversationId") {
+        Ok(id) => id,
+        Err(diagnostic) => return agy_ignored(diagnostic),
+    };
+    let mut dropped = DroppedFields::default();
+    let transcript_checked = optional_path(payload, "transcriptPath");
+    let transcript_provided = !matches!(transcript_checked, Ok(None));
+    let transcript_path = dropped.keep("transcriptPath", transcript_checked);
+    let cwd = dropped.keep("cwd", optional_path(payload, "cwd"));
+    let model = dropped.keep("modelName", optional_label(payload, "modelName"));
+    let artifact_dir = dropped.keep(
+        "artifactDirectoryPath",
+        optional_path(payload, "artifactDirectoryPath"),
+    );
+
+    // As of agy 1.5.16, subagent hooks omit parent/root ids on stdin and carry
+    // an empty `lastUserInput`, while lead hooks carry the active prompt. Walk
+    // `.system_generated/messages/*.json` upward from `artifactDirectoryPath`
+    // to link subagents (including nested grandchildren) to their root lead.
+    let has_user_input = payload
+        .get("lastUserInput")
+        .and_then(Value::as_str)
+        .is_some_and(|text| !text.is_empty());
+
+    let (provider_session_id, agent_id, agent_type) = if has_user_input {
+        (conversation_id, None, None)
+    } else if let Some(lineage) = artifact_dir.as_deref().and_then(|dir| {
+        crate::agy_status::resolve_subagent_lineage(&conversation_id, Path::new(dir))
+    }) {
+        (
+            lineage.root_session_id,
+            Some(conversation_id),
+            lineage.role.or(lineage.type_name),
+        )
+    } else {
+        // Skip unlinked empty-input events before binding admission so they
+        // can never hijack the pane's active lead binding.
+        return ProviderEvent::skipped(
+            Provider::Agy,
+            "agy event has empty lastUserInput and no resolved parent session",
+        );
+    };
+
+    let is_child = agent_id.is_some();
+    let execution_id = if is_child {
+        Ok(None)
+    } else {
+        nonempty_optional_label(payload.get("executionId"), "executionId")
+    };
+    let mut event = ProviderEvent {
+        provider_session_id: Some(provider_session_id),
+        agent_id,
+        agent_type,
+        transcript_path,
+        cwd,
+        model,
+        diagnostic: dropped.diagnostic(),
+        ..ProviderEvent::inert(Some(Provider::Agy))
+    };
+
+    match event_name {
+        "SessionStart" if is_child => {
+            event.action = ProviderAction::ChildActive;
+        }
+        "SessionStart" => {
+            event.action = ProviderAction::Binding;
+            event.start_source = Some("unspecified".to_owned());
+        }
+        "PreInvocation" if is_child => {
+            event.action = ProviderAction::ChildActive;
+        }
+        "PreInvocation" => {
+            let Some(invocation_num) = payload.get("invocationNum").and_then(Value::as_u64) else {
+                return ProviderEvent::ignored(
+                    Some(Provider::Agy),
+                    DiagnosticCode::RecordInvalid,
+                    "PreInvocation requires invocationNum",
+                );
+            };
+            event.initial_step_count = payload
+                .get("initialNumSteps")
+                .and_then(Value::as_i64)
+                .filter(|count| *count >= 0);
+            event.lazy_binding = event.transcript_path.is_some();
+            event.action = ProviderAction::Activity;
+            event.activity_type = Some("thinking".to_owned());
+            if invocation_num == 0 {
+                // Fail closed whenever the payload names a transcript path that
+                // was rejected, unreadable, symlinked, or does not confirm a
+                // fresh USER_INPUT turn; only truly absent transcriptPath
+                // (synthetic payloads without a transcript) defaults to prompt.
+                let prompt_check = if !transcript_provided {
+                    Some(true)
+                } else {
+                    event.transcript_path.as_deref().and_then(|path| {
+                        crate::agy_status::is_user_prompt_invocation(Path::new(path))
+                    })
+                };
+                match prompt_check {
+                    Some(true) => {
+                        event.is_lead_prompt = true;
+                        match execution_id {
+                            Ok(turn_id) => {
+                                event.observation = Some(agy_observation(
+                                    event_name,
+                                    None,
+                                    None,
+                                    turn_id,
+                                    ObservationBody::PromptSubmitted { input_source: None },
+                                ));
+                            }
+                            Err(problem) => event.observation_diagnostic = Some(problem),
+                        }
+                    }
+                    Some(false) => {
+                        event.continues_turn = true;
+                    }
+                    None => {}
+                }
+            } else {
+                event.continues_turn = true;
+            }
+        }
+        "PreToolUse" => {
+            let AgyToolCall {
+                name: tool_name,
+                id: tool_call_id,
+                ..
+            } = match agy_tool_call(payload, event_name) {
+                Ok(parsed) => parsed,
+                Err(diagnostic) => return agy_ignored(diagnostic),
+            };
+            let (tool_class, question_mode) = classify_tool("agy", &tool_name);
+            if question_mode == Some(QuestionMode::Blocking) {
+                event.action = ProviderAction::Activity;
+                event.activity_type = Some("notify".to_owned());
+            } else if is_child {
+                event.action = ProviderAction::ChildActive;
+            } else {
+                event.action = ProviderAction::Activity;
+                event.activity_type = Some("thinking".to_owned());
+            }
+            match (tool_call_id, execution_id) {
+                (Ok(tool_call_id), Ok(turn_id)) => {
+                    event.observation = Some(agy_observation(
+                        event_name,
+                        event.agent_id.as_deref(),
+                        tool_call_id,
+                        turn_id,
+                        ObservationBody::ToolPreflight {
+                            tool_name,
+                            tool_class,
+                            question_mode,
+                        },
+                    ));
+                }
+                (Err(problem), _) | (_, Err(problem)) => {
+                    event.observation_diagnostic = Some(problem);
+                }
+            }
+        }
+        "PostToolUse" => {
+            let AgyToolCall {
+                object: tool_call,
+                name: tool_name,
+                id: tool_call_id,
+            } = match agy_tool_call(payload, event_name) {
+                Ok(parsed) => parsed,
+                Err(diagnostic) => return agy_ignored(diagnostic),
+            };
+            let (tool_class, question_mode) = classify_tool("agy", &tool_name);
+            let error_flag = agy_post_tool_error(payload);
+            if tool_name == "manage_subagents" && matches!(error_flag, Ok(None)) {
+                let (in_flight, stopped) = agy_manage_subagents_stops(tool_call, !is_child);
+                event.in_flight_task_ids = in_flight;
+                event.stopped_child_ids = stopped;
+            }
+            let stops_children =
+                event.in_flight_task_ids.is_some() || !event.stopped_child_ids.is_empty();
+            if question_mode == Some(QuestionMode::Blocking) || stops_children {
+                if is_child {
+                    event.action = ProviderAction::ChildActive;
+                } else {
+                    event.action = ProviderAction::Activity;
+                    event.activity_type = Some("thinking".to_owned());
+                    if stops_children {
+                        event.continues_turn = true;
+                    }
+                }
+            } else {
+                event.action = ProviderAction::Observation;
+            }
+            match (tool_call_id, execution_id, error_flag) {
+                (Ok(tool_call_id), Ok(turn_id), Ok(is_error)) => {
+                    event.observation = Some(agy_observation(
+                        event_name,
+                        event.agent_id.as_deref(),
+                        tool_call_id,
+                        turn_id,
+                        ObservationBody::ToolResult {
+                            tool_name,
+                            tool_class,
+                            question_mode,
+                            result_surface: ResultSurface::PostHook,
+                            is_error,
+                            interrupted: None,
+                        },
+                    ));
+                }
+                (Err(problem), _, _) | (_, Err(problem), _) | (_, _, Err(problem)) => {
+                    event.observation_diagnostic = Some(problem);
+                }
+            }
+        }
+        "Stop" => {
+            let fully_idle =
+                match optional_bool(payload, "fullyIdle", "Stop fullyIdle flag is invalid") {
+                    Ok(flag) => flag,
+                    Err(diagnostic) => return agy_ignored(diagnostic),
+                };
+            if is_child {
+                event.action = if fully_idle == Some(false) {
+                    ProviderAction::ChildActive
+                } else {
+                    ProviderAction::ChildStopped
+                };
+                return event;
+            }
+            // As of agy 1.5.16, `fullyIdle: false` fires when the lead pauses
+            // while background subagents or tasks are still running; keep the
+            // turn open as thinking with no turn-end observation.
+            if fully_idle == Some(false) {
+                event.action = ProviderAction::Activity;
+                event.activity_type = Some("thinking".to_owned());
+                event.continues_turn = true;
+                return event;
+            }
+            let continuation_active = match optional_bool(
+                payload,
+                "continuationActive",
+                "Stop continuationActive flag is invalid",
+            ) {
+                Ok(flag) => flag.unwrap_or(false),
+                Err(diagnostic) => return agy_ignored(diagnostic),
+            };
+            let execution_num = match payload.get("executionNum") {
+                None | Some(Value::Null) => None,
+                Some(value) => match value.as_u64() {
+                    Some(num) => Some(num),
+                    None => {
+                        return ProviderEvent::ignored(
+                            Some(Provider::Agy),
+                            DiagnosticCode::RecordInvalid,
+                            "Stop executionNum is invalid",
+                        );
+                    }
+                },
+            };
+            let reason = payload.get("terminationReason").and_then(Value::as_str);
+            let body = match reason {
+                Some("NO_TOOL_CALL" | "TERMINAL_STEP_TYPE" | "INJECTED_RESPONSE") => {
+                    event.action = ProviderAction::Activity;
+                    event.activity_type = Some("stop".to_owned());
+                    ObservationBody::ResponseFinished {
+                        // As of agy 1.5.16, `continuationActive` stayed false
+                        // on a Stop hook continuation while `executionNum`
+                        // incremented to 1.
+                        stop_hook_active: Some(
+                            continuation_active || execution_num.is_some_and(|num| num > 0),
+                        ),
+                        execution_num,
+                    }
+                }
+                Some("USER_CANCELED") => {
+                    event.action = ProviderAction::Clear;
+                    ObservationBody::UserInterrupt
+                }
+                Some(
+                    code @ ("ERROR"
+                    | "MAX_INVOCATIONS"
+                    | "MAX_FORCED_INVOCATIONS"
+                    | "MAX_TOKEN_BUDGET_EXCEEDED"
+                    | "TERMINAL_CUSTOM_HOOK"),
+                ) => {
+                    event.action = ProviderAction::Activity;
+                    event.activity_type = Some("notify".to_owned());
+                    event.label = Some(code.to_owned());
+                    ObservationBody::AttemptOutcome {
+                        outcome: AttemptOutcome::Failed,
+                        error_category: None,
+                        error_code: Some(code.to_owned()),
+                    }
+                }
+                _ => {
+                    return ProviderEvent::ignored(
+                        Some(Provider::Agy),
+                        DiagnosticCode::RecordInvalid,
+                        "Stop terminationReason is missing or unsupported",
+                    );
+                }
+            };
+            event.in_flight_task_ids = Some(Vec::new());
+            match execution_id {
+                Ok(turn_id) => {
+                    event.observation =
+                        Some(agy_observation(event_name, None, None, turn_id, body));
+                }
+                Err(problem) => event.observation_diagnostic = Some(problem),
+            }
+        }
+        _ => {
+            return ProviderEvent::ignored(
+                Some(Provider::Agy),
+                DiagnosticCode::IntegrationVersionMismatch,
+                "provider event has no transition",
+            );
+        }
+    }
+    event
+}
+
 pub fn parse_provider_event(
     provider_name: &str,
     event_name: &str,
@@ -852,9 +1388,10 @@ pub fn parse_provider_event(
         Provider::Claude | Provider::Codex => {
             parse_claude_or_codex(provider, event_name, payload, env)
         }
+        Provider::Agy => parse_agy(event_name, payload),
     };
     event.source_event = event_name.to_owned();
-    if event.action != ProviderAction::Ignored {
+    if event.action != ProviderAction::Ignored && provider != Provider::Agy {
         let parsed = match event_name {
             "PreToolUse"
             | "PostToolUse"
@@ -944,22 +1481,82 @@ pub fn reply_content(
     payload: &Value,
     requested: bool,
 ) -> crate::hook_content::HookContent {
+    reply_content_with_transcript_fallback(event, payload, requested, true)
+}
+
+/// Extract reply content for a transient hook delivery, gating mutable
+/// on-disk transcript fallback (`agy` when `finalModelOutput` is absent/empty)
+/// on `outcome.reply_transcript_attributable` so a replayed or superseded
+/// `Stop` never attributes a newer turn's transcript tail to an earlier
+/// observation id.
+pub fn reply_content_for_outcome(
+    event: &ProviderEvent,
+    payload: &Value,
+    requested: bool,
+    outcome: &crate::lifecycle::HookOutcome,
+) -> crate::hook_content::HookContent {
+    reply_content_with_transcript_fallback(
+        event,
+        payload,
+        requested,
+        outcome.reply_transcript_attributable,
+    )
+}
+
+fn reply_content_with_transcript_fallback(
+    event: &ProviderEvent,
+    payload: &Value,
+    requested: bool,
+    allow_transcript_fallback: bool,
+) -> crate::hook_content::HookContent {
     use crate::hook_content::HookContent;
     if !requested {
         return HookContent::NotRequested;
     }
-    if !matches!(event.provider, Some(Provider::Claude | Provider::Codex))
-        || event.source_event != "Stop"
-        || event.agent_id.is_some()
-    {
+    if event.agent_id.is_some() || event.source_event != "Stop" {
         return HookContent::Unsupported;
     }
-    // Codex declares this field nullable and sends null when a turn ends
-    // without final text; that is a turn with no reply, not a malformed one.
-    if payload.get("last_assistant_message") == Some(&Value::Null) {
-        return HookContent::Absent;
+    match event.provider {
+        Some(Provider::Claude | Provider::Codex) => {
+            // Codex declares this field nullable and sends null when a turn ends
+            // without final text; that is a turn with no reply, not a malformed one.
+            if payload.get("last_assistant_message") == Some(&Value::Null) {
+                return HookContent::Absent;
+            }
+            text_content(payload, "last_assistant_message")
+        }
+        Some(Provider::Agy) => {
+            if event.activity_type.as_deref() != Some("stop") {
+                return HookContent::Unsupported;
+            }
+            let max_bytes = match manifest() {
+                Ok(protocol) => protocol.limits.max_json_bytes,
+                Err(_) => return HookContent::Absent,
+            };
+            match payload.get("finalModelOutput") {
+                Some(Value::String(text)) if !text.is_empty() => {
+                    if text.len() <= max_bytes {
+                        return HookContent::Available { text: text.clone() };
+                    }
+                    return HookContent::TooLarge;
+                }
+                None | Some(Value::Null) | Some(Value::String(_)) => {}
+                Some(_) => return HookContent::Invalid,
+            }
+            if !allow_transcript_fallback {
+                return HookContent::Absent;
+            }
+            let Some(path) = event.transcript_path.as_deref() else {
+                return HookContent::Absent;
+            };
+            match crate::agy_status::last_reply_from_transcript(Path::new(path), max_bytes) {
+                crate::agy_status::ReplyRead::Available(text) => HookContent::Available { text },
+                crate::agy_status::ReplyRead::Absent => HookContent::Absent,
+                crate::agy_status::ReplyRead::TooLarge => HookContent::TooLarge,
+            }
+        }
+        Some(Provider::Pi) | None => HookContent::Unsupported,
     }
-    text_content(payload, "last_assistant_message")
 }
 
 pub fn prompt_content(
@@ -971,13 +1568,18 @@ pub fn prompt_content(
     if !requested {
         return HookContent::NotRequested;
     }
-    if !matches!(event.provider, Some(Provider::Claude | Provider::Codex))
-        || event.source_event != "UserPromptSubmit"
-        || event.agent_id.is_some()
-    {
+    if event.agent_id.is_some() {
         return HookContent::Unsupported;
     }
-    text_content(payload, "prompt")
+    match event.provider {
+        Some(Provider::Claude | Provider::Codex) if event.source_event == "UserPromptSubmit" => {
+            text_content(payload, "prompt")
+        }
+        Some(Provider::Agy) if event.is_lead_prompt => text_content(payload, "lastUserInput"),
+        Some(Provider::Claude | Provider::Codex | Provider::Pi | Provider::Agy) | None => {
+            HookContent::Unsupported
+        }
+    }
 }
 
 fn text_content(payload: &Value, field: &str) -> crate::hook_content::HookContent {
@@ -1120,7 +1722,7 @@ fn observation_for_body(
             {
                 strict_optional_label(payload, "prompt_id")?
             }
-            Provider::Claude | Provider::Pi => None,
+            Provider::Claude | Provider::Pi | Provider::Agy => None,
         },
         elicitation_id: if elicitation {
             strict_optional_label(payload, "elicitation_id")?
@@ -1152,27 +1754,13 @@ fn observation_for_body(
     } else {
         uuid::Uuid::new_v4().to_string()
     };
-    Ok(LifecycleObservation {
-        turn_end: None,
+    Ok(draft_observation(
+        event_name,
         observation_id,
-        source_event: event_name.to_owned(),
-        source_version: None,
-        observed_mono_ns: "00000000000000000000".to_owned(),
-        written_at_unix_ns: "00000000000000000000".to_owned(),
-        actor: match &event.agent_id {
-            Some(id) => Actor::Child {
-                agent_id: id.clone(),
-                agent_key: crate::protocol::sha256_hex(id.as_bytes()),
-            },
-            None => Actor::Lead,
-        },
-        correlation: if correlation == NativeCorrelation::default() {
-            None
-        } else {
-            Some(correlation)
-        },
+        event.agent_id.as_deref(),
+        correlation,
         body,
-    })
+    ))
 }
 
 fn parse_request_observation(
@@ -1286,6 +1874,7 @@ fn parse_run_observation(
                     })
                 })
                 .transpose()?,
+            execution_num: None,
         },
         // Among hook events, one kind with two meanings. Claude Code 2.1.284
         // sends StopFailure instead of Stop, so for Claude this ends the turn.

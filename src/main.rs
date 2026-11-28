@@ -1058,8 +1058,12 @@ fn run_hooks_event(
             &ports,
             &request,
         );
-        let reply =
-            wezterm_attention::providers::reply_content(&event, &payload, args.include_reply);
+        let reply = wezterm_attention::providers::reply_content_for_outcome(
+            &event,
+            &payload,
+            args.include_reply,
+            &outcome,
+        );
         let prompt =
             wezterm_attention::providers::prompt_content(&event, &payload, args.include_prompt);
         let delivery = delivery_bytes(&outcome, reply, prompt);

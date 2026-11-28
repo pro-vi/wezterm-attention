@@ -81,6 +81,8 @@ mod claim_fence;
 #[path = "lifecycle_spec/plugin_writes.rs"]
 mod plugin_writes;
 
+#[path = "lifecycle_spec/agy.rs"]
+mod agy;
 #[path = "lifecycle_spec/claude_esc_turn_end.rs"]
 mod claude_esc_turn_end;
 #[path = "lifecycle_spec/claude_status.rs"]
@@ -1469,6 +1471,8 @@ fn every_active_lifecycle_row_reaches_the_production_writer() {
             let provider = case["provider"].as_str().unwrap();
             let (start, patch) = if provider == "pi" {
                 ("session_start", json!({"start_source":"startup"}))
+            } else if provider == "agy" {
+                ("SessionStart", json!({}))
             } else {
                 ("SessionStart", json!({"source":"startup"}))
             };
@@ -1478,8 +1482,33 @@ fn every_active_lifecycle_row_reaches_the_production_writer() {
             );
             let name = case["event"].as_str().unwrap();
             let mut patch = case["patch"].clone();
-            patch["prompt"] = json!("SYNTHETIC-PRIVATE-SENTINEL");
-            patch["tool_input"] = json!({"private":"SYNTHETIC-PRIVATE-SENTINEL"});
+            if provider == "agy" {
+                if patch.get("lastUserInput").is_none() {
+                    patch["lastUserInput"] = json!("SYNTHETIC-PRIVATE-SENTINEL");
+                }
+                if name == "PreInvocation" && patch.get("transcriptPath").is_none() {
+                    let tx = setup._scratch.0.join("agy-coverage-transcript.jsonl");
+                    fs::write(
+                        &tx,
+                        format!(
+                            "{}\n",
+                            json!({"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "SYNTHETIC-PRIVATE-SENTINEL"})
+                        ),
+                    )
+                    .unwrap();
+                    patch["transcriptPath"] = json!(tx.to_string_lossy());
+                }
+                if let Some(parent_id) = case.get("child_of").and_then(Value::as_str) {
+                    let child_id = patch["conversationId"].as_str().unwrap();
+                    let brain = setup._scratch.0.join("agy-contact").join("brain");
+                    let child_dir =
+                        write_agy_child_link(&brain, parent_id, child_id, "worker", "self");
+                    patch["artifactDirectoryPath"] = json!(child_dir.to_string_lossy());
+                }
+            } else {
+                patch["prompt"] = json!("SYNTHETIC-PRIVATE-SENTINEL");
+                patch["tool_input"] = json!({"private":"SYNTHETIC-PRIVATE-SENTINEL"});
+            }
             let output = run_hook(
                 &setup,
                 &["hooks", "event", provider, name, "--strict"],
@@ -1493,9 +1522,10 @@ fn every_active_lifecycle_row_reaches_the_production_writer() {
             );
             assert!(output.stdout.is_empty());
             let directory = setup.binding_dir(provider, "coverage");
-            // A case with an agent id is a subagent's event, and a subagent's
-            // observations have their own snapshot.
-            let from_child = case["patch"].get("agent_id").is_some();
+            // A case with an agent id or child_of is a subagent's
+            // event, and a subagent's observations have their own snapshot.
+            let from_child =
+                case["patch"].get("agent_id").is_some() || case.get("child_of").is_some();
             let file = if from_child {
                 "children-lifecycle.json"
             } else {
@@ -1646,6 +1676,38 @@ fn live_child_ids(setup: &Setup, provider: &str, session: &str) -> Vec<String> {
         .collect()
 }
 
+fn write_agy_child_link(
+    brain_root: &std::path::Path,
+    parent_id: &str,
+    child_id: &str,
+    role: &str,
+    type_name: &str,
+) -> PathBuf {
+    fs::create_dir_all(brain_root.join(parent_id)).unwrap();
+    let child_dir = brain_root.join(child_id);
+    let mdir = child_dir.join(".system_generated").join("messages");
+    fs::create_dir_all(&mdir).unwrap();
+    let args_json = json!({"Role": role, "TypeName": type_name}).to_string();
+    fs::write(
+        mdir.join("0001.json"),
+        serde_json::to_vec(&json!({
+            "sender": parent_id,
+            "sourceMetadata": {
+                "tool": {
+                    "conversationId": parent_id,
+                    "toolCall": {
+                        "name": "invoke_subagent",
+                        "argumentsJson": args_json
+                    }
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    child_dir
+}
+
 fn run_hook(setup: &Setup, arguments: &[&str], payload: &Value) -> std::process::Output {
     let mut child = rust_command(setup)
         .args(arguments)
@@ -1674,6 +1736,14 @@ fn payload(provider: &str, event: &str, session: &str, patch: Value) -> Value {
             "session_file": "/tmp/pi.jsonl",
             "cwd": "/tmp/project",
             "model": "model-a"
+        }),
+        "agy" => json!({
+            "conversationId": session,
+            "transcriptPath": "/tmp/agy.jsonl",
+            "cwd": "/tmp/project",
+            "hookEventName": event,
+            "modelName": "gemini-3.8-flash-medium",
+            "lastUserInput": "hello"
         }),
         _ => json!({
             "session_id": session,
@@ -1709,12 +1779,15 @@ fn load_fixture(name: &str) -> Value {
 
 #[test]
 fn provider_fixtures_equal_the_closed_action_vocabulary() {
+    let fixture_scratch = Scratch::new();
     let mut seen = BTreeSet::new();
-    for provider in ["claude", "codex", "pi"] {
+    for provider in ["claude", "codex", "pi", "agy"] {
         let fixture = load_fixture(provider);
         for case in fixture["cases"].as_array().expect("fixture cases") {
             let mut payload = fixture["base"].clone();
-            if provider != "pi" {
+            if provider == "agy" {
+                payload["hookEventName"] = case["event"].clone();
+            } else if provider != "pi" {
                 payload["hook_event_name"] = case["event"].clone();
             }
             if let (Some(target), Some(patch)) = (
@@ -1724,6 +1797,14 @@ fn provider_fixtures_equal_the_closed_action_vocabulary() {
                 for (key, value) in patch {
                     target.insert(key.clone(), value.clone());
                 }
+            }
+            if provider == "agy"
+                && let Some(parent_id) = case.get("child_of").and_then(Value::as_str)
+            {
+                let child_id = payload["conversationId"].as_str().unwrap();
+                let brain = fixture_scratch.0.join("agy-provider").join("brain");
+                let child_dir = write_agy_child_link(&brain, parent_id, child_id, "worker", "self");
+                payload["artifactDirectoryPath"] = json!(child_dir.to_string_lossy());
             }
             let environment: BTreeMap<String, String> = case
                 .get("env")
@@ -1779,7 +1860,7 @@ fn hook_description_is_exhaustive_read_only_and_pins_public_fields() {
     use wezterm_attention::providers::{HookRegistration, describe_hooks};
     let contact: Value =
         serde_json::from_str(include_str!("../fixtures/lifecycle/contact-cases.json")).unwrap();
-    for provider in ["claude", "codex", "pi"] {
+    for provider in ["claude", "codex", "pi", "agy"] {
         let fixture = load_fixture(provider);
         let description = describe_hooks(provider).unwrap();
         for hook in &description.native_hooks {
@@ -1792,7 +1873,9 @@ fn hook_description_is_exhaustive_read_only_and_pins_public_fields() {
                 .filter(|case| case["event"] == *callback)
             {
                 let mut payload = fixture["base"].clone();
-                if provider != "pi" {
+                if provider == "agy" {
+                    payload["hookEventName"] = json!(callback);
+                } else if provider != "pi" {
                     payload["hook_event_name"] = json!(callback);
                 }
                 if let Some(patch) = case["patch"].as_object() {

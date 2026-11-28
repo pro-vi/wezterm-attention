@@ -320,7 +320,9 @@ later parent `Stop` that is published after its last event; a repeated `Stop`
 the writer skips keeps the earlier cutoff. A Claude sub-agent also goes at the
 next lead `Stop` whose `background_tasks` no longer lists it, so what stays
 counted to the session's end is one that Claude Code still lists, or one in a
-Claude Code session that sends no list.
+Claude Code session that sends no list. An Agy sub-agent also goes on a lead or
+child `PostToolUse` of `manage_subagents` (`kill` / lead `kill_all`) or a
+terminal lead `Stop` (`fullyIdle != false`).
 The end goes missing when:
 
 - the `SubagentStop` hook failed, timed out, or was not registered;
@@ -360,8 +362,10 @@ What starting again loses differs by file:
 
 - **The child set.** The new set is written even when the event changes
   nothing else. While the set is invalid, until the next event that writes it
-  (a child's start, stop, tool call or permission request, a Codex parent's
-  `Stop`, or a Claude lead's `Stop` that lists tasks), the tab shows `+?`. The
+  (a child's start, stop, tool call, permission request or Agy `ask_question`, a
+  Codex parent's `Stop`, a Claude lead's `Stop` that lists tasks, or an Agy
+  lead `manage_subagents` `kill`/`kill_all` or terminal `Stop`), the tab shows
+  `+?`. The
   sub-agents the
   invalid set held are counted again only at their next event, so one in
   the middle of a long command stays uncounted until it calls another tool or
@@ -431,9 +435,14 @@ not list. One that records a Claude turn stopped with Esc writes a
 `user_interrupt` with `source_event` `session_status`, which a plugin from 1.3.0
 or earlier does not list. Such a plugin reads the binding's `lifecycle.json` as
 invalid and shows its pane with no lifecycle until the end leaves the pool. A
-plugin reads the manifest once, when WezTerm loads its configuration, so one
-updated on disk still reads that way until the configuration is reloaded.
-Update the plugin with the command, as [Install](../README.md#install) says.
+command recording Agy events writes `provider: "agy"` (including
+`user_interrupt` with `source_event` `agy_status`), which a plugin from 1.17.0
+or earlier does not list in `enums.providers`; such a plugin rejects the
+binding's `binding.json` (and `children.json`/`lifecycle.json`) and returns an
+empty view for that pane until the plugin is updated and reloaded. A plugin
+reads the manifest once, when WezTerm loads its configuration, so one updated
+on disk still reads that way until the configuration is reloaded. Update the
+plugin with the command, as [Install](../README.md#install) says.
 
 ## A record write can be reported failed after readers already see it
 
@@ -541,7 +550,7 @@ every binding and is not affected. Nothing is removed on the index's word.
 ## Removing a pane tree removes the lock files it holds
 
 Pane retention removes the pane's whole directory while it holds the pane's
-claim lock and the launch lock, and those lock files, with a Codex turn
+claim lock and the launch lock, and those lock files, with a turn
 follower's `.follower.lock`, are inside that directory. A
 writer that opened the old lock file and is waiting on it takes the lock on the
 removed file once sweep lets go, and a later writer creates a new lock file at
@@ -668,7 +677,8 @@ another's pane.
 
 ## A session whose start did not claim its pane records nothing until its next start
 
-An agent that claims its own pane claims it only at a session start. When that
+For Claude Code, Codex and Pi, an agent that claims its own pane claims it only
+at a session start. When that
 hook does not finish, because the agent stopped it at its timeout (on a heavily
 loaded machine Claude Code 2.1.301 cancelled one after 53 s against a 5 s
 timeout), or the start was refused, the pane keeps the claim it had: none, or
@@ -681,7 +691,11 @@ one does, is not shown.
 
 The session's next start claims the pane once the earlier agent has exited,
 whatever its source: `/clear`, `/compact`, `/resume`, or the agent started
-again. A tool or turn event does not claim it. A binding is made from a
+again. A tool or turn event does not claim it (the one exception is a lead Agy
+`PreInvocation` carrying a valid `transcriptPath`, because as of `agy` 1.5.16
+`agy --resume` skips `SessionStart`; see the
+[record contract](record-contract.md#claims-and-how-an-event-finds-its-launch)).
+A binding is made from a
 session start: `start_source` is a required field of the binding record, and a
 tool event has no start source to give it, nor the start's model. A claim taken
 from a tool event would need a binding without one, which the record contract
@@ -764,6 +778,54 @@ cannot do:
   or its write failed, leaves no record that it stopped.
 - After an approval the tab keeps `notify` until the turn's `Stop`. The file
   then reads `busy` again within 0.03 s, and Attention does not act on that.
+
+## An `agy` turn stopped with Esc is recorded only from its status databases
+
+As of `agy` 1.5.16, pressing Esc in the interactive TUI or sending `SIGINT` in
+print mode runs no `Stop` hook and writes no cancellation entry to
+`transcript_full.jsonl`. On macOS, a lead `agy` prompt hook (`PreInvocation`
+with `invocationNum: 0`) that proved its host (`WEZTERM_ATTENTION_HOST_PID`)
+starts a turn follower (`attention hooks follow-turn`) that polls `agy`'s
+private SQLite databases (`conversation_summaries.db` and
+`conversations/<id>.db`, linked against the macOS SDK `libsqlite3`) once a
+second. It records a lead `user_interrupt` with `source_event` `agy_status` and
+writes an activity clear once either a step at or after `initialNumSteps`
+carries `CORTEX_STEP_STATUS_CANCELED` (`6`) or `CORTEX_STEP_STATUS_INTERRUPTED`
+(`12`) with no active step running and no active summary row, or
+`conversation_summaries.db` transitions from working (`RUNNING`/`BUSY`/`CANCELING`
+or `not_fully_idle != 0`) to idle (`CASCADE_RUN_STATUS_IDLE`, `not_fully_idle = 0`).
+
+What it cannot do, and what else rests on `agy` 1.5.16's private on-disk files:
+
+- **macOS only for the Esc follower.** Elsewhere, an Esc-interrupted `agy` turn
+  stays `thinking` until the next turn ends or `agy` exits.
+- **Private schema dependence and replay attribution.** Final replies for
+  `--include-reply` (when `Stop.finalModelOutput` is unset), prompt-vs-wakeup
+  disambiguation at `PreInvocation(invocationNum: 0)` (`transcript_full.jsonl`),
+  subagent parent/root linkage
+  (`<artifactDirectoryPath>/.system_generated/messages/*.json`), and Esc
+  detection (`conversation_summaries.db`, `conversations/<id>.db`) all read
+  `agy` 1.5.16's private on-disk files. Every reader is bounded, refuses
+  symlinks and foreign ownership, and fails closed if `agy` changes its private
+  layout or SQLite schema. Because `transcript_full.jsonl` carries no
+  `executionId`, `--include-reply` falls back to `transcript_full.jsonl` only
+  when `Stop` carries an `executionId` and freshly writes a non-superseded end
+  matching the binding's current prompt boundary (assuming synchronous `Stop`
+  hook delivery before `agy` appends the next turn); replayed, superseded,
+  anonymous, or history-less `Stop` callbacks without `finalModelOutput` report
+  `reply` as `absent` rather than reading a newer turn's tail.
+- **No hook consumer or check on `agy_status`.** As with Claude's
+  `session_status`, no hook consumer, reply capture, or quiet check runs for a
+  follower-recorded `agy_status` interrupt; `attention observe` and
+  `attention inspect` still see it.
+- **`PostToolUse.error` is empty for skipped `ask_question` and non-zero commands.**
+  As of `agy` 1.5.16, answered `ask_question`, Esc-skipped `ask_question`, and
+  failing `run_command` exits all send `PostToolUse` with `error: ""` and no
+  `result`. `attention observe --for answer` therefore reports that `ask_question`
+  returned, not that the user submitted an answer, and `tool_result.is_error`
+  is set only when `error` is non-empty.
+- **Failed or timed-out `Stop` hooks.** A turn whose `Stop` hook failed or timed
+  out is cleared as `agy_status` when the conversation returns to idle.
 
 ## A sub-agent whose permission was granted reads as waiting until its next tool call
 

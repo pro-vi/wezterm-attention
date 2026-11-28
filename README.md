@@ -1,6 +1,6 @@
 # wezterm-attention
 
-Your WezTerm tab bar shows what the AI agent in each tab is doing: working, finished, or waiting for you. It works with Claude Code, Codex and Pi, and any script can set its tab the same way: a build, a test run, a long job.
+Your WezTerm tab bar shows what the AI agent in each tab is doing: working, finished, or waiting for you. It works with Claude Code, Codex, Pi and Antigravity CLI (`agy`), and any script can set its tab the same way: a build, a test run, a long job.
 
 ![Five Claude Code tabs in WezTerm, each marked in the tab bar as working, finished, waiting for you, or flagged for review](docs/media/tabs.gif)
 
@@ -55,6 +55,7 @@ Reload the WezTerm config afterwards. **Run `install-cli.sh` again after every `
 
 - **Claude Code:** merge [these hooks](docs/setup.md#claude-code-hooks) into `~/.claude/settings.json`.
 - **Codex:** add [these hooks](docs/setup.md#codex-hooks) to `~/.codex/hooks.json`, approve them with `/hooks` in Codex, and start Codex as `codex --no-daemon`.
+- **Antigravity CLI (`agy`):** merge [these hooks](docs/setup.md#antigravity-cli-agy-hooks) into `~/.gemini/config/hooks.json`.
 - **Pi:** run `pi install git:github.com/pro-vi/wezterm-attention`.
 
 On macOS that is all: an agent claims its own pane when its session starts. On Linux the shell claims the pane; set that up as [Mux setup](docs/mux-setup.md) describes.
@@ -77,7 +78,7 @@ Attention keeps a record of the agent session in each pane: its state, which age
 - **Inside WezTerm:** `attention.get_attention_view(pane)` returns a pane's view, and the `on_view_change` option calls your function when a view changes. `attention.visible_attention(pane_ids)` returns what the tab bar shows for a set of panes, for drawing one entry for several tabs.
 - **From any program:** `attention bindings`, `attention tabs`, `attention inspect` and `attention observe` answer in JSON.
 - **Before a turn end is recorded:** a program registered with `--hold-check` can mark it held, shown as a crescent moon, when the agent's work goes on (Claude Code only); one registered with `--quiet-check` can mark it quiet, shown as ↪, when nobody needs to be called. See [pre-write hold checks](docs/consumer-guide.md#pre-write-hold-checks).
-- **As a turn starts:** a `--quiet-check` on the lead `UserPromptSubmit` and `PreToolUse` hook lines of Claude Code or Codex can mark a turn an application sent, shown as the thinking mark on a second blue while it works.
+- **As a turn starts:** a `--quiet-check` on the lead prompt and pre-tool hooks of providers that support quiet checks can mark a turn an application sent, shown as the thinking mark on a second blue while it works.
 - **On each hook:** a program registered with `--consumer` receives the event, and with `--include-reply` the agent's final message.
 - **To set a tab:** `attention mark thinking|stop|notify|review|clear --source NAME`, run from a shell that has claimed the pane.
 
@@ -87,7 +88,7 @@ Built on it so far, outside this repository: a prompt-cache countdown, a pane pi
 
 | Page | What it covers |
 |------|----------------|
-| [Setup](docs/setup.md) | Each install step in full, and the hooks for Claude Code, Codex and Pi |
+| [Setup](docs/setup.md) | Each install step in full, and hook setup for every supported agent |
 | [The tab bar](docs/tab-bar.md) | Every state, the sub-agent count, the review flag, muting, how polling works |
 | [Configuration](docs/configuration.md) | Every option, render modes, custom tab titles, the Lua API |
 | [Building on Attention](docs/building-on-attention.md) | Setting a tab from your own tools, the drawn tab order, what has been built |

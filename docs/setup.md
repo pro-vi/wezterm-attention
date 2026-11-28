@@ -45,7 +45,7 @@ The launcher follows the link to find its checkout, so it works from anywhere on
 
 **After every `wezterm.plugin.update_all()`, run `install-cli.sh` again.** Updating replaces the Lua files with the newest commit on the repository's default branch, and leaves the previously built command in place, so the plugin can run ahead of the writer.
 
-Then register the [Claude Code](#claude-code-hooks) and [Codex](#codex-hooks) hooks. On macOS that is enough: an agent's first session start claims its pane by itself, so zsh needs no claim step. Bash still claims each agent command it starts, and on Linux a shell claim is the only way to claim; [Mux setup](mux-setup.md) covers both shells. See [Record contract](record-contract.md) for precedence and [Mux pane moves](mux-pane-moves.md) before moving the final pane out of a server tab.
+Then register the [Claude Code](#claude-code-hooks), [Codex](#codex-hooks) and [Antigravity CLI](#antigravity-cli-agy-hooks) hooks. On macOS that is enough: an agent's first session start claims its pane by itself, so zsh needs no claim step. Bash still claims each agent command it starts, and on Linux a shell claim is the only way to claim; [Mux setup](mux-setup.md) covers both shells. See [Record contract](record-contract.md) for precedence and [Mux pane moves](mux-pane-moves.md) before moving the final pane out of a server tab.
 
 ### Using your own clone instead
 
@@ -115,7 +115,7 @@ WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event claude Stop \
 
 Only a non-empty native `background_tasks` array with available reply text runs the check. Its input contains the checked scope, reply and unchanged array; neither content is stored by Attention. A validated hold shows the fixed held mark (`indicators.held`, a crescent moon by default) with thinking color and is not automatically acknowledged. While a sub-agent waits for permission, no check runs, the turn end is recorded unheld, and the tab shows `notify` until the wait ends. Timeout or failure supplies no hold. The checks share an outer budget, 5000 ms unless `--check-budget-ms` sets it; ordinary consumer and native-work time are additional. See [the exact input, output and record contract](consumer-guide.md#pre-write-hold-checks) and [ADR 0005](adr/0005-application-hold-notes-on-recorded-turn-ends.md). Update matching readers and writers before activation; this repository does not register or install the check for you.
 
-`--quiet-check NAME=/absolute/executable` runs the same way on a lead Claude or Codex `Stop`, for an application that can prove nobody needs to be called, such as a controller that submitted the prompt itself. A validated quiet note shows `↪` with a blue tint and records `turn_end.held` false; a waiting permission or a held turn end takes precedence, and a failure, timeout or missing lifecycle history leaves the ordinary turn end. Registered on the lead `UserPromptSubmit` and `PreToolUse` lines as well, the same program is asked as a turn starts, and a turn it proves an application's shows the thinking indicator on a second blue tint while it works. See [quiet checks in the consumer guide](consumer-guide.md#pre-write-hold-checks).
+`--quiet-check NAME=/absolute/executable` runs the same way on a lead Claude, Codex or normal Agy `Stop`, for an application that can prove nobody needs to be called, such as a controller that submitted the prompt itself. A validated quiet note shows `↪` with a blue tint and records `turn_end.held` false; a waiting permission or a held turn end takes precedence, and a failure, timeout or missing lifecycle history leaves the ordinary turn end. Registered on the lead `UserPromptSubmit` (or Agy `PreInvocation`) and `PreToolUse` lines as well, the same program is asked as a turn starts, and a turn it proves an application's shows the thinking indicator on a second blue tint while it works. See [quiet checks in the consumer guide](consumer-guide.md#pre-write-hold-checks).
 
 ## Codex hooks
 
@@ -154,6 +154,26 @@ The setting does not keep a session out of a server that is already running, so 
 ```
 
 `SubagentStart` counts a subagent from its start. Child attribution needs matching native `agent_id` values; see [contact evidence](reviews/lifecycle-contact-results.md) for the paths that were exercised. A root `Stop` writes the lead stop and stops counting every subagent whose last event came before it. Codex (source at commit `985cf47a4`) does not make a parent wait for its subagents, but in the sessions recorded with Codex 0.157.1 none worked after its parent's `Stop`; one that does is counted again at its next event (see [accepted limitations](accepted-limitations.md#the-sub-agent-count-depends-on-how-claude-code-and-codex-send-hooks)). An `Interrupt` clears the tab's activity for that session, because Codex runs no `Stop` after one. A turn that ends on a model error runs no hook either, as of Codex 0.162.0; a turn follower records it from the session rollout as `notify` labelled with Codex's error code (see [accepted limitations](accepted-limitations.md#a-codex-turn-that-ends-on-a-model-error-is-recorded-only-from-its-rollout)). A child's `PermissionRequest` shows `notify` on the tab, since Codex has no `Notification` hook.
+
+## Antigravity CLI (`agy`) hooks
+
+Antigravity CLI (`agy`) reads global lifecycle hooks from `~/.gemini/config/hooks.json` (and project hooks from `.agents/hooks.json`). `attention hooks describe --provider agy --json` lists the five registered rows: `SessionStart`, `PreInvocation`, `PreToolUse`, `PostToolUse` and `Stop`. Use the same `WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event agy <Event>` command form and PATH link as for Claude Code and Codex.
+
+In `~/.gemini/config/hooks.json` (unlike Claude Code and Codex, `agy` 1.5.16 nests each event under a named hook key, uses flat handler arrays for `SessionStart`, `PreInvocation` and `Stop`, and wraps `PreToolUse` and `PostToolUse` in a `matcher`/`hooks` group):
+
+```json
+{
+  "wezterm-attention": {
+    "SessionStart":  [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event agy SessionStart", "timeout": 15 }],
+    "PreInvocation": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event agy PreInvocation", "timeout": 15 }],
+    "PreToolUse":    [{ "matcher": "*", "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event agy PreToolUse", "timeout": 15 }] }],
+    "PostToolUse":   [{ "matcher": "*", "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event agy PostToolUse", "timeout": 15 }] }],
+    "Stop":          [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event agy Stop", "timeout": 15 }]
+  }
+}
+```
+
+As of `agy` 1.5.16, `SessionStart` binds a new conversation (and replaces the active binding on `/new` or `/clear` in the same host process), while `agy --resume <id>` skips `SessionStart` and binds lazily on its first lead `PreInvocation` ([claims and launch resolution](record-contract.md#claims-and-how-an-event-finds-its-launch)). `PreInvocation` starts `thinking` on user prompts (supporting `--include-prompt` and `--quiet-check`) and starts the macOS turn follower that clears Esc-interrupted turns from `agy`'s local status databases ([accepted limitations](accepted-limitations.md#an-agy-turn-stopped-with-esc-is-recorded-only-from-its-status-databases)). `ask_question` marks `notify` on `PreToolUse` and returns the lead to `thinking` (or a child from `waiting` back to `running`) on `PostToolUse`; `Stop` keeps `thinking` while `fullyIdle` is false, records `stop`, `notify`, or `clear` by `terminationReason` when idle ([which observations end a turn](consumer-guide.md#which-observations-end-a-turn), with `--include-reply` and `--quiet-check` on normal stops), and reconciles subagents ([child presence](record-contract.md#child-presence)). Unlinked events with an empty `lastUserInput` are skipped before binding admission.
 
 ## Pi extension
 

@@ -26,6 +26,8 @@ pub struct HookDelivery {
     pub source: AdmittedHook,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observation_kind: Option<String>,
     pub persistence: HookPersistence,
     /// Whether the user has muted the pane, so a consumer that makes a sound
     /// can stay quiet.
@@ -137,6 +139,10 @@ pub fn delivery_bytes(
         delivery_id: Uuid::new_v4().to_string(),
         source,
         observation_id: outcome.observation_id.clone(),
+        observation_kind: outcome
+            .observation_id
+            .as_ref()
+            .and_then(|_| outcome.observation_kind.clone()),
         persistence: outcome.persistence.clone(),
         muted: outcome.muted,
         turn_end: outcome.turn_end.clone(),

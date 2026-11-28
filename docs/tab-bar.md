@@ -33,15 +33,16 @@ A program that reports progress with WezTerm's progress sequence (OSC 9;4), as c
 
 ## Subagent activity
 
-Claude Code and Codex hooks record each subagent of a pane from its
-`SubagentStart`, or from its first tool call or permission request when no
-start was seen, until it ends. A subagent stays counted however long it is
-quiet, as while it runs one long command. It stops counting at its own
-`SubagentStop`, at a Codex parent's `Stop` that comes after its last event, at
-a Claude lead's `Stop` whose `background_tasks` no longer lists it, or when its
-session ends. The count is independent of the pane's own activity: a
-pane can carry running subagents with no activity at all — the parent agent
-stopped and you acknowledged its check — or alongside activity of any type.
+Providers that report subagents count each child of a pane from when it starts
+— or from its first reported tool call, permission request, or blocking
+question when no start was seen — until it ends. A subagent stays counted
+however long it is quiet, as while it runs one long command. It stops counting
+when the provider reports that child ended, reconciles its live subagent set at
+a lead stop or kill, or ends the session (see
+[Child presence](record-contract.md#child-presence) for each provider's hooks).
+The count is independent of the pane's own activity: a pane can carry running
+subagents with no activity at all — the parent agent stopped and you
+acknowledged its check — or alongside activity of any type.
 
 The tab renders the count as `+N`, inside the space the indicator already
 occupies:
@@ -64,9 +65,8 @@ In a tab with several panes, `+2?` means two subagents are counted and another
 pane's count is unknown.
 
 The count is what the hooks reported, not a process list. A subagent whose end
-was never reported, because its `SubagentStop` hook failed or was not
-registered, stays counted until the lead's next `Stop` stops listing it, or
-until its session ends. See
+was never reported, because its stop hook failed or was not registered, stays
+counted until a lead reconciliation removes it or its session ends. See
 [accepted limitations](accepted-limitations.md#a-sub-agent-whose-end-is-never-reported-stays-counted-until-its-session-ends).
 
 The count never decides which state wins the tab — priority is settled by the

@@ -310,10 +310,10 @@ def parse_record(value: Any, manifest: dict[str, Any]) -> str:
         if kind == "activity" and "hold_notes" in value:
             quiet = all(note.get("quiet") is True for note in value["hold_notes"].values())
             if value["target"]["kind"] != "binding" or not (
-                (value["type"] == "stop" and (value["source"] == "claude" or (value["source"] == "codex" and quiet)))
-                or (value["type"] == "thinking" and quiet and value["source"] in {"claude", "codex"})
+                (value["type"] == "stop" and (value["source"] == "claude" or (value["source"] in {"codex", "agy"} and quiet)))
+                or (value["type"] == "thinking" and quiet and value["source"] in {"claude", "codex", "agy"})
             ):
-                raise InvalidRecord("hold notes require a binding stop, or a quiet note on Claude or Codex thinking")
+                raise InvalidRecord("hold notes require a binding stop, or a quiet note on Claude, Codex or Agy thinking")
         if kind == "activity" and "unseen_stop" in value and (
             value["target"]["kind"] != "binding"
             or (value["type"] != "thinking" and not any(
@@ -436,13 +436,8 @@ def validate_lifecycle(value: dict[str, Any], manifest: dict[str, Any]) -> None:
             request = kind in {"approval_requested", "automatic_denial", "elicitation_requested", "elicitation_action_selected", "notice"}
             if kind in {"tool_preflight", "tool_result"}:
                 request = item["tool_class"] != "generic"
-                provider_tool = (value["provider"], item["tool_name"])
-                expected = {
-                    ("claude", "AskUserQuestion"): ("question", "blocking"),
-                    ("codex", "request_user_input"): ("question", "blocking"),
-                    ("codex", "request_user_input_async"): ("question", "nonblocking"),
-                    ("codex", "request_permissions"): ("permission", None),
-                }.get(provider_tool, ("generic", None))
+                entry = manifest["tool_classification"].get(value["provider"], {}).get(item["tool_name"])
+                expected = (entry["tool_class"], entry.get("question_mode")) if entry else ("generic", None)
                 if (item["tool_class"], item.get("question_mode")) != expected:
                     raise InvalidRecord("tool classification mismatch")
                 if item.get("question_mode") == "nonblocking":
@@ -459,8 +454,9 @@ def validate_lifecycle(value: dict[str, Any], manifest: dict[str, Any]) -> None:
                 if (actor["kind"] != "lead" or item["source_event"] not in sources
                     or compact_size(item) - compact_size(native) > limits["lifecycle_envelope_max_bytes"]
                     or any("note" in check and (item["source_event"] != "Stop"
+                        or kind != "response_finished"
                         or (check["note"].get("hold") and value["provider"] != "claude")
-                        or (check["note"].get("quiet") and value["provider"] not in {"claude", "codex"}))
+                        or (check["note"].get("quiet") and value["provider"] not in {"claude", "codex", "agy"}))
                         for check in end["hold_checks"])):
                     raise InvalidRecord("invalid annotated turn end")
             if name != ("requests" if request else "general") or compact_size(item) > limits["lifecycle_observation_max_bytes"]:

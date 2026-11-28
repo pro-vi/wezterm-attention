@@ -173,6 +173,28 @@
         "registration": "register",
         "native_event": "session_compact"
       }
+    },
+    "agy": {
+      "SessionStart": {
+        "registration": "register",
+        "native_event": "SessionStart"
+      },
+      "PreInvocation": {
+        "registration": "register",
+        "native_event": "PreInvocation"
+      },
+      "PreToolUse": {
+        "registration": "register",
+        "native_event": "PreToolUse"
+      },
+      "PostToolUse": {
+        "registration": "register",
+        "native_event": "PostToolUse"
+      },
+      "Stop": {
+        "registration": "register",
+        "native_event": "Stop"
+      }
     }
   },
   "tool_classification": {
@@ -182,7 +204,8 @@
       "request_user_input_async": {"tool_class": "question", "question_mode": "nonblocking"},
       "request_permissions": {"tool_class": "permission"}
     },
-    "pi": {}
+    "pi": {},
+    "agy": {"ask_question": {"tool_class": "question", "question_mode": "blocking"}}
   },
   "digests": {
     "algorithm": "sha256",
@@ -246,9 +269,9 @@
     ],
     "end_reasons": ["session_end", "sweep_absent"],
     "pane_presence": ["present", "verified_absent", "unavailable"],
-    "providers": ["claude", "codex", "pi"],
+    "providers": ["claude", "codex", "pi", "agy"],
     "reader_confidence": ["confirmed", "unconfirmed"],
-    "subagent_providers": ["claude", "codex"],
+    "subagent_providers": ["claude", "codex", "agy"],
     "subagent_statuses": ["active", "stopped"]
   },
   "lifecycle_sources": {
@@ -344,6 +367,27 @@
       ],
       "compaction_succeeded": [
         "session_compact"
+      ]
+    },
+    "agy": {
+      "prompt_submitted": [
+        "PreInvocation"
+      ],
+      "tool_preflight": [
+        "PreToolUse"
+      ],
+      "tool_result": [
+        "PostToolUse"
+      ],
+      "response_finished": [
+        "Stop"
+      ],
+      "attempt_outcome": [
+        "Stop"
+      ],
+      "user_interrupt": [
+        "Stop",
+        "agy_status"
       ]
     }
   },
@@ -492,11 +536,12 @@
     },
     "prompt_reference": {
       "required": ["observation_id", "observed_mono_ns", "written_at_unix_ns"],
-      "optional": [],
+      "optional": ["turn_id"],
       "types": {
         "observation_id": "uuid",
         "observed_mono_ns": "monotonic_ns20",
-        "written_at_unix_ns": "unix_ns20"
+        "written_at_unix_ns": "unix_ns20",
+        "turn_id": "safe_label"
       }
     },
     "unseen_stop": {
@@ -682,6 +727,7 @@
         "source_version",
         "correlation",
         "stop_hook_active",
+        "execution_num",
         "turn_end"
       ],
       "types": {
@@ -694,6 +740,7 @@
         "actor": "lifecycle_actor",
         "correlation": "native_correlation",
         "stop_hook_active": "boolean",
+        "execution_num": "unsigned_integer",
         "turn_end": "turn_end"
       }
     },
@@ -999,7 +1046,7 @@
   "records": {
     "lifecycle_snapshot": {"required":["kind","schema","address","launch_id","binding_id","provider","snapshot_id","written_at_unix_ns","pools"],"optional":[],"types":{"kind":"record_kind","schema":"record_schema","address":"pane_address","launch_id":"uuid","binding_id":"hex64","provider":"provider","snapshot_id":"uuid","written_at_unix_ns":"unix_ns20","pools":"lifecycle_pools"}},
     "child_lifecycle_snapshot": {"required":["kind","schema","address","launch_id","binding_id","provider","snapshot_id","written_at_unix_ns","pools"],"optional":[],"types":{"kind":"record_kind","schema":"record_schema","address":"pane_address","launch_id":"uuid","binding_id":"hex64","provider":"provider","snapshot_id":"uuid","written_at_unix_ns":"unix_ns20","pools":"lifecycle_pools"}},
-    "lead_prompts": {"required":["kind","schema","address","launch_id","binding_id","answers"],"optional":["latest"],"types":{"kind":"record_kind","schema":"record_schema","address":"pane_address","launch_id":"uuid","binding_id":"hex64","latest":"prompt_reference","answers":"prompt_answers"}},
+    "lead_prompts": {"required":["kind","schema","address","launch_id","binding_id","answers"],"optional":["latest","last_execution_num","execution_history_lost"],"types":{"kind":"record_kind","schema":"record_schema","address":"pane_address","launch_id":"uuid","binding_id":"hex64","latest":"prompt_reference","last_execution_num":"unsigned_integer","execution_history_lost":"boolean","answers":"prompt_answers"}},
     "host": {"required":["kind","schema","address","launch_id","binding_id","owner_pid","owner_started_sec","owner_started_usec","owner_boot_session_id","tty_path","tty_fingerprint","source_event","written_at_unix_ns"],"optional":["contested_at_unix_ns"],"types":{"kind":"record_kind","schema":"record_schema","address":"pane_address","launch_id":"uuid","binding_id":"hex64","owner_pid":"canonical_decimal","owner_started_sec":"canonical_decimal","owner_started_usec":"canonical_decimal","owner_boot_session_id":"uuid","tty_path":"absolute_path","tty_fingerprint":"hex64","source_event":"safe_label","written_at_unix_ns":"unix_ns20","contested_at_unix_ns":"unix_ns20"}},
     "realm": {
       "required": ["kind", "schema", "realm_id", "socket_path", "writer_version"],
@@ -1290,6 +1337,18 @@
     "pi": {
       "run_settled": [
         "agent_settled"
+      ]
+    },
+    "agy": {
+      "response_finished": [
+        "Stop"
+      ],
+      "attempt_outcome": [
+        "Stop"
+      ],
+      "user_interrupt": [
+        "Stop",
+        "agy_status"
       ]
     }
   }
