@@ -1529,16 +1529,17 @@ fn append_observation(
                 let identity = resolved.binding(&binding_id);
                 if let Some(snapshot) = lifecycle_snapshot(&resolved.root, &identity) {
                     let prompt_read = read_latest_prompt(&resolved.root, &identity);
-                    if let Some((turn_id, max_num, pooled_prompt)) =
-                        pending_agy_guard_recovery(&snapshot, &prompt_read)
-                    {
-                        let (write, restarted) = prepare_agy_execution_end(
+                    if let Some(recovery) = pending_agy_guard_recovery(&snapshot, &prompt_read) {
+                        let (write, restarted) = prepare_agy_guard_write(
                             resolved,
                             &identity,
                             &binding_id,
-                            &turn_id,
-                            max_num,
-                            pooled_prompt.as_ref(),
+                            recovery.prompt_to_heal.as_ref(),
+                            recovery
+                                .execution_end
+                                .as_ref()
+                                .map(|(id, num)| (id.as_str(), *num)),
+                            recovery.pooled_prompt.as_ref(),
                         )?;
                         prompts_problem =
                             restarted.then(|| started_again_diagnostic("prompt_record"));
@@ -1718,14 +1719,17 @@ fn append_observation(
                     _ => evidence.persistence.lifecycle = Persistence::Rejected,
                 }
             }
-            if let Some((turn_id, max_num, pooled_prompt)) = pre_reduce_recovery {
-                match prepare_agy_execution_end(
+            if let Some(recovery) = pre_reduce_recovery {
+                match prepare_agy_guard_write(
                     resolved,
                     &identity,
                     &binding_id,
-                    &turn_id,
-                    max_num,
-                    pooled_prompt.as_ref(),
+                    recovery.prompt_to_heal.as_ref(),
+                    recovery
+                        .execution_end
+                        .as_ref()
+                        .map(|(id, num)| (id.as_str(), *num)),
+                    recovery.pooled_prompt.as_ref(),
                 ) {
                     Ok((write, restarted)) => {
                         prompts_replacement = write;
@@ -1755,39 +1759,46 @@ fn append_observation(
                     .filter(|item| item.is_lead_prompt()),
             )
             .map(|item| PromptReference::of_for(Provider::Agy, item));
+            let prompt_to_heal = pre_reduce_recovery
+                .as_ref()
+                .and_then(|recovery| recovery.prompt_to_heal.clone());
             let max_num = pre_reduce_recovery
                 .as_ref()
-                .filter(|(prev_turn, _, _)| prev_turn == turn_id)
-                .map_or(*num, |(_, prev, _)| (*num).max(*prev));
-            Some((turn_id.to_owned(), max_num, pooled_prompt))
+                .and_then(|recovery| recovery.execution_end.as_ref())
+                .filter(|(prev_turn, _)| prev_turn == turn_id)
+                .map_or(*num, |(_, prev)| (*num).max(*prev));
+            Some((turn_id.to_owned(), max_num, prompt_to_heal, pooled_prompt))
         } else {
             None
         };
-        if let Some((turn_id, num, pooled_prompt)) = fresh_agy_ordinal {
+        if let Some((turn_id, num, prompt_to_heal, pooled_prompt)) = fresh_agy_ordinal {
             // Write lifecycle.json first so prompts.json never records an
             // execution ordinal ahead of a confirmed Stop; if the second write
             // fails, continuation and subsequent writes heal prompts.json
             // before lifecycle.json can evict the recorded Stop.
-            let (write, restarted) = prepare_agy_execution_end(
+            let (write, restarted) = prepare_agy_guard_write(
                 resolved,
                 &identity,
                 &binding_id,
-                &turn_id,
-                num,
+                prompt_to_heal.as_ref(),
+                Some((&turn_id, num)),
                 pooled_prompt.as_ref(),
             )?;
             prompts_problem = restarted.then(|| started_again_diagnostic("prompt_record"));
             prompts_replacement = write;
-        } else if let Some((turn_id, num, pooled_prompt)) = pre_reduce_recovery {
-            // The Stop is already recorded in lifecycle.json; persist its
-            // ordinal into prompts.json BEFORE this write can evict it.
-            let (write, restarted) = prepare_agy_execution_end(
+        } else if let Some(recovery) = pre_reduce_recovery {
+            // The prompt or Stop is already recorded in lifecycle.json;
+            // persist it into prompts.json BEFORE this write can evict it.
+            let (write, restarted) = prepare_agy_guard_write(
                 resolved,
                 &identity,
                 &binding_id,
-                &turn_id,
-                num,
-                pooled_prompt.as_ref(),
+                recovery.prompt_to_heal.as_ref(),
+                recovery
+                    .execution_end
+                    .as_ref()
+                    .map(|(id, num)| (id.as_str(), *num)),
+                recovery.pooled_prompt.as_ref(),
             )?;
             prompts_problem = restarted.then(|| started_again_diagnostic("prompt_record"));
             if let Some(write) = write {
@@ -1995,12 +2006,12 @@ fn prepare_prompts(
     Ok((Some(PreparedRecordWrite::new(path, &value)?), restarted))
 }
 
-fn prepare_agy_execution_end(
+fn prepare_agy_guard_write(
     resolved: &ResolvedLaunch,
     identity: &RecordIdentity,
     binding_id: &str,
-    turn_id: &str,
-    execution_num: u64,
+    prompt_to_heal: Option<&PromptReference>,
+    execution_end: Option<(&str, u64)>,
     pooled_prompt: Option<&PromptReference>,
 ) -> Result<(Option<PreparedRecordWrite>, bool)> {
     let path = identity.path(&resolved.root, "lead_prompts")?;
@@ -2018,10 +2029,31 @@ fn prepare_agy_execution_end(
             protocol.record_schema,
         ),
     };
-    let seeded = prompts.latest.is_none()
-        && pooled_prompt.is_some_and(|prompt| prompts.record_prompt(prompt));
-    let moved = prompts.record_agy_execution_end(turn_id, execution_num, pooled_prompt);
-    if !(seeded || moved || restarted) {
+    let mut changed = false;
+    if let Some(prompt) = prompt_to_heal {
+        if prompts.record_prompt(prompt) {
+            changed = true;
+        } else if let Some(latest) = &mut prompts.latest
+            && latest.turn_id.is_none()
+            && prompt.turn_id.is_some()
+            && latest.observation_id == prompt.observation_id
+            && latest.observed_mono_ns == prompt.observed_mono_ns
+        {
+            latest.turn_id = prompt.turn_id.clone();
+            changed = true;
+        }
+    } else if prompts.latest.is_none()
+        && let Some(prompt) = pooled_prompt
+        && prompts.record_prompt(prompt)
+    {
+        changed = true;
+    }
+    if let Some((turn_id, execution_num)) = execution_end
+        && prompts.record_agy_execution_end(turn_id, execution_num, pooled_prompt)
+    {
+        changed = true;
+    }
+    if !(changed || restarted) {
         return Ok((None, restarted));
     }
     let value = serde_json::to_value(&prompts).map_err(AttentionError::record_json)?;
@@ -4641,46 +4673,100 @@ enum AgyStopOwnership {
     Unknown,
 }
 
-fn pending_agy_guard_recovery(
-    snapshot: &LifecycleSnapshot,
+struct EffectiveAgyPrompt {
+    prompt: PromptReference,
+    last_execution_num: Option<u64>,
+    prompt_behind_snapshot: bool,
+}
+
+fn effective_agy_prompt(
+    usable_snapshot: Option<&LifecycleSnapshot>,
+    history_lost: bool,
     prompt_read: &PromptRecordRead,
-) -> Option<(String, u64, Option<PromptReference>)> {
+) -> Option<EffectiveAgyPrompt> {
     if matches!(prompt_read, PromptRecordRead::Unreadable) {
         return None;
     }
-    let recorded_prompt = prompt_read.as_reference();
+    let pooled_prompt = usable_snapshot.and_then(|snapshot| {
+        latest(
+            snapshot
+                .lead_observations()
+                .filter(|item| item.is_lead_prompt()),
+        )
+    });
+    match (prompt_read.as_reference(), pooled_prompt) {
+        (Some(recorded), Some(pooled))
+            if pooled.observed_mono_ns.as_str() > recorded.observed_mono_ns.as_str() =>
+        {
+            Some(EffectiveAgyPrompt {
+                prompt: PromptReference::of_for(Provider::Agy, pooled),
+                last_execution_num: None,
+                prompt_behind_snapshot: true,
+            })
+        }
+        (Some(recorded), Some(pooled))
+            if recorded.turn_id.is_none()
+                && pooled.observation_id == recorded.observation_id
+                && pooled.observed_mono_ns == recorded.observed_mono_ns =>
+        {
+            let prompt = PromptReference::of_for(Provider::Agy, pooled);
+            let prompt_behind_snapshot = prompt.turn_id.is_some();
+            Some(EffectiveAgyPrompt {
+                prompt,
+                last_execution_num: prompt_read.last_execution_num(),
+                prompt_behind_snapshot,
+            })
+        }
+        (Some(recorded), _) => Some(EffectiveAgyPrompt {
+            prompt: recorded.clone(),
+            last_execution_num: prompt_read.last_execution_num(),
+            prompt_behind_snapshot: false,
+        }),
+        (None, Some(pooled)) if !history_lost => Some(EffectiveAgyPrompt {
+            prompt: PromptReference::of_for(Provider::Agy, pooled),
+            last_execution_num: None,
+            prompt_behind_snapshot: true,
+        }),
+        (None, _) => None,
+    }
+}
+
+struct AgyGuardRecovery {
+    prompt_to_heal: Option<PromptReference>,
+    execution_end: Option<(String, u64)>,
+    pooled_prompt: Option<PromptReference>,
+}
+
+fn pending_agy_guard_recovery(
+    snapshot: &LifecycleSnapshot,
+    prompt_read: &PromptRecordRead,
+) -> Option<AgyGuardRecovery> {
+    let history_lost = snapshot.pools.general.retention_floor_mono_ns.is_some();
+    let effective = effective_agy_prompt(Some(snapshot), history_lost, prompt_read)?;
+    let prompt_to_heal = effective
+        .prompt_behind_snapshot
+        .then(|| effective.prompt.clone());
+    let execution_end = effective.prompt.turn_id.as_deref().and_then(|turn_id| {
+        let max_num = snapshot_max_agy_execution_num(snapshot, turn_id)?;
+        effective
+            .last_execution_num
+            .is_none_or(|prev| max_num > prev)
+            .then(|| (turn_id.to_owned(), max_num))
+    });
+    if prompt_to_heal.is_none() && execution_end.is_none() {
+        return None;
+    }
     let pooled_prompt = latest(
         snapshot
             .lead_observations()
             .filter(|item| item.is_lead_prompt()),
     )
     .map(|item| PromptReference::of_for(Provider::Agy, item));
-    let current_turn_id = recorded_prompt
-        .and_then(|recorded| {
-            recorded.turn_id.as_deref().or_else(|| {
-                pooled_prompt
-                    .as_ref()
-                    .filter(|pooled| {
-                        pooled.observation_id == recorded.observation_id
-                            && pooled.observed_mono_ns == recorded.observed_mono_ns
-                    })
-                    .and_then(|pooled| pooled.turn_id.as_deref())
-            })
-        })
-        .or_else(|| {
-            recorded_prompt
-                .is_none()
-                .then(|| pooled_prompt.as_ref().and_then(|p| p.turn_id.as_deref()))
-                .flatten()
-        })?;
-    let max_num = snapshot_max_agy_execution_num(snapshot, current_turn_id)?;
-    if prompt_read
-        .last_execution_num()
-        .is_some_and(|prev| max_num <= prev)
-    {
-        return None;
-    }
-    Some((current_turn_id.to_owned(), max_num, pooled_prompt))
+    Some(AgyGuardRecovery {
+        prompt_to_heal,
+        execution_end,
+        pooled_prompt,
+    })
 }
 
 fn snapshot_max_agy_execution_num(snapshot: &LifecycleSnapshot, turn_id: &str) -> Option<u64> {
@@ -4710,51 +4796,33 @@ fn agy_stop_ownership(
         return AgyStopOwnership::Unknown;
     }
     let usable_snapshot = snapshot.filter(|_| !snapshot_unusable);
-    let pooled_prompt = usable_snapshot.and_then(|snapshot| {
-        latest(
-            snapshot
-                .lead_observations()
-                .filter(|item| item.is_lead_prompt()),
-        )
-    });
     let history_lost = snapshot_unusable
         || usable_snapshot
             .is_some_and(|snapshot| snapshot.pools.general.retention_floor_mono_ns.is_some());
-    let (effective_prompt, last_execution_num) = match (prompt_read.as_reference(), pooled_prompt) {
-        (Some(recorded), Some(pooled))
-            if pooled.observed_mono_ns.as_str() > recorded.observed_mono_ns.as_str() =>
-        {
-            (Some(PromptReference::of_for(Provider::Agy, pooled)), None)
-        }
-        (Some(recorded), Some(pooled))
-            if recorded.turn_id.is_none()
-                && pooled.observation_id == recorded.observation_id
-                && pooled.observed_mono_ns == recorded.observed_mono_ns =>
-        {
-            (
-                Some(PromptReference::of_for(Provider::Agy, pooled)),
-                prompt_read.last_execution_num(),
-            )
-        }
-        (Some(recorded), _) => (Some(recorded.clone()), prompt_read.last_execution_num()),
-        (None, Some(pooled)) => {
-            if history_lost {
-                return if pooled
+    let effective = effective_agy_prompt(usable_snapshot, history_lost, prompt_read);
+    let Some(EffectiveAgyPrompt {
+        prompt,
+        last_execution_num,
+        ..
+    }) = effective
+    else {
+        if history_lost {
+            let pooled_prompt = usable_snapshot.and_then(|snapshot| {
+                latest(
+                    snapshot
+                        .lead_observations()
+                        .filter(|item| item.is_lead_prompt()),
+                )
+            });
+            return if pooled_prompt.is_some_and(|pooled| {
+                pooled
                     .turn_id()
                     .is_some_and(|pid| draft.turn_id().is_some_and(|did| did != pid))
-                {
-                    AgyStopOwnership::Stale
-                } else {
-                    AgyStopOwnership::Unknown
-                };
-            }
-            (Some(PromptReference::of_for(Provider::Agy, pooled)), None)
-        }
-        (None, None) => (None, None),
-    };
-    let Some(prompt) = effective_prompt else {
-        if history_lost {
-            return AgyStopOwnership::Unknown;
+            }) {
+                AgyStopOwnership::Stale
+            } else {
+                AgyStopOwnership::Unknown
+            };
         }
         let conflicting_turn = usable_snapshot.is_some_and(|snapshot| {
             snapshot.lead_observations().any(|item| {
@@ -4787,6 +4855,19 @@ fn agy_stop_ownership(
                 match (effective_last, execution_num) {
                     (Some(last), Some(candidate)) if *candidate <= last => AgyStopOwnership::Stale,
                     (Some(_), None) => AgyStopOwnership::Unknown,
+                    (None, Some(_)) => {
+                        let has_turn_evidence = usable_snapshot.is_some_and(|snapshot| {
+                            snapshot.lead_observations().any(|item| {
+                                (!item.ends_turn(Provider::Agy) || ends_agy_invocation(item))
+                                    && item.turn_id() == Some(current_id)
+                            })
+                        });
+                        if has_turn_evidence {
+                            AgyStopOwnership::Current
+                        } else {
+                            AgyStopOwnership::Unknown
+                        }
+                    }
                     (None, None) if history_lost || usable_snapshot.is_none() => {
                         AgyStopOwnership::Unknown
                     }
@@ -5626,7 +5707,7 @@ mod lifecycle_write_tests {
         let mut initial_prompts = samples["lead_prompts"].clone();
         initial_prompts["latest"]["turn_id"] = json!("exec-1");
         crate::records::atomic_replace(&prompts_path, &initial_prompts).unwrap();
-        let mut agy_prompts = initial_prompts;
+        let mut agy_prompts = initial_prompts.clone();
         agy_prompts["last_execution_num"] = json!(1);
         let stop_draft = |num: u64| LifecycleObservation {
             observation_id: Uuid::new_v4().to_string(),
@@ -5672,9 +5753,47 @@ mod lifecycle_write_tests {
         assert!(!path.exists());
         let untouched_prompts = read_latest_prompt(&root, &binding);
         assert_eq!(untouched_prompts.last_execution_num(), None);
+        // With the prior turn's snapshot intact (carrying exec-1's prompt),
+        // retrying Stop(1) still classifies as Current; when both lifecycle.json
+        // and last_execution_num are absent (rebuild after lost ordinal), Stop(1)
+        // classifies as Unknown so an old replay cannot close a continuation.
+        let mut intact_snapshot: LifecycleSnapshot = serde_json::from_value(snapshot).unwrap();
+        intact_snapshot.provider = Provider::Agy;
+        intact_snapshot.pools.general.observations = vec![LifecycleObservation {
+            observation_id: initial_prompts["latest"]["observation_id"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+            observed_mono_ns: initial_prompts["latest"]["observed_mono_ns"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+            written_at_unix_ns: initial_prompts["latest"]["written_at_unix_ns"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+            source_event: "PreInvocation".into(),
+            source_version: None,
+            actor: crate::observations::Actor::Lead,
+            correlation: Some(crate::observations::NativeCorrelation {
+                turn_id: Some("exec-1".into()),
+                ..Default::default()
+            }),
+            turn_end: None,
+            body: crate::observations::ObservationBody::PromptSubmitted { input_source: None },
+        }];
+        assert_eq!(
+            agy_stop_ownership(
+                &stop_draft(1),
+                Some(&intact_snapshot),
+                false,
+                &untouched_prompts
+            ),
+            AgyStopOwnership::Current
+        );
         assert_eq!(
             agy_stop_ownership(&stop_draft(1), None, false, &untouched_prompts),
-            AgyStopOwnership::Current
+            AgyStopOwnership::Unknown
         );
 
         let heal_mutation = Mutation {

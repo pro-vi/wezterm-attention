@@ -299,6 +299,8 @@ fn agy_lead_turn_prompt_reply_observation_kind_and_wakeup_separation() {
             json!({"step_index": 2, "type": "USER_INPUT", "status": "DONE", "content": "Next turn"}),
         ],
     );
+    let prompts_path = setup.binding_dir("agy", LEAD).join("prompts.json");
+    let turn1_prompts_bytes = fs::read(&prompts_path).unwrap();
     let mut turn2_pre = pre_inv.clone();
     turn2_pre["executionId"] = json!("exec-2");
     turn2_pre["lastUserInput"] = json!("Next turn");
@@ -308,6 +310,11 @@ fn agy_lead_turn_prompt_reply_observation_kind_and_wakeup_separation() {
             .status
             .success()
     );
+    // Simulate Turn 2's prompts.json write failing (leaving Turn 1 in
+    // prompts.json while Turn 2 reached lifecycle.json): subsequent writes must
+    // heal Turn 2 into prompts.json before tool traffic can evict Turn 2's
+    // prompt from lifecycle.json.
+    fs::write(&prompts_path, &turn1_prompts_bytes).unwrap();
     write_jsonl(
         &tx,
         &[
@@ -576,6 +583,44 @@ fn agy_lead_turn_prompt_reply_observation_kind_and_wakeup_separation() {
     assert!(!stop_sink.exists());
     let rebuilt_same_exec = agy_hook_cli(&setup, "Stop", &turn2_stop_cont1, &stop_flags);
     assert!(!rebuilt_same_exec.status.success());
+    assert!(!stop_sink.exists());
+    // Even if last_execution_num was also lost before lifecycle.json was
+    // deleted, replaying a numbered Stop without invocation evidence stays
+    // superseded across repeated deliveries.
+    let mut lost_ord_prompts: Value =
+        serde_json::from_slice(&fs::read(&prompts_path).unwrap()).unwrap();
+    lost_ord_prompts
+        .as_object_mut()
+        .unwrap()
+        .remove("last_execution_num");
+    fs::write(
+        &prompts_path,
+        serde_json::to_vec(&lost_ord_prompts).unwrap(),
+    )
+    .unwrap();
+    let _ = fs::remove_file(setup.binding_dir("agy", LEAD).join("lifecycle.json"));
+    let lost_both = agy_hook_cli(&setup, "Stop", &turn2_stop_cont1, &stop_flags);
+    assert!(!lost_both.status.success());
+    assert!(!stop_sink.exists());
+    // Replaying the same Stop deduplicates to the Superseded record with
+    // absent reply, and a higher executionNum on the rebuilt snapshot still
+    // lacks live turn evidence and stays superseded.
+    assert!(
+        agy_hook_cli(&setup, "Stop", &turn2_stop_cont1, &stop_flags)
+            .status
+            .success()
+    );
+    let lost_replay: Value = serde_json::from_slice(&fs::read(&stop_sink).unwrap()).unwrap();
+    assert_eq!(lost_replay["turn_end"]["status"], "superseded");
+    assert_eq!(lost_replay["reply"], json!({"availability": "absent"}));
+    let _ = fs::remove_file(&stop_sink);
+    let mut lost_higher = turn2_stop_cont1.clone();
+    lost_higher["executionNum"] = json!(2);
+    assert!(
+        !agy_hook_cli(&setup, "Stop", &lost_higher, &stop_flags)
+            .status
+            .success()
+    );
     assert!(!stop_sink.exists());
 
     // Error Stop (TERMINAL_CUSTOM_HOOK) produces attempt_outcome, notify with
